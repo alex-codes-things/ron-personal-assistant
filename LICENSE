@@ -1,11 +1,3 @@
-
-The triple backticks inside the README may confuse copying from the rendered message. You can also leave the README short for now if that happens—we can improve it after GitHub is connected.
-
-### 7. Add the MIT licence
-
-Open `LICENSE`:
-
-```text
 MIT License
 
 Copyright (c) 2026 AlexCodesThings

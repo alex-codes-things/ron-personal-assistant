@@ -19,6 +19,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+desktop-preview = [
+    "PySide6>=6.8,<7",
+]
 
 [project.scripts]
 ron = "ron.__main__:main"

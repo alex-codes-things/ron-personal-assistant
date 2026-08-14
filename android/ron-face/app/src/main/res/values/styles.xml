@@ -1,0 +1,11 @@
+<resources>
+    <style name="RonFaceTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#02060B</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:colorAccent">#43DFC4</item>
+        <item name="android:navigationBarColor">#02060B</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

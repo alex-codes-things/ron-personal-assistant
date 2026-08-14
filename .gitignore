@@ -45,3 +45,13 @@ logs/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Android build output and local SDK paths
+android/**/.gradle/
+android/**/build/
+android/**/local.properties
+*.apk
+*.aab
+*.backup-*
+*.corrupted-*
+ron-face-build-error.txt
