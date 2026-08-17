@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ron-personal-assistant"
-version = "0.1.0"
+version = "0.3.3"
 description = "An open-source personal assistant built in Python."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -12,7 +12,9 @@ license = "MIT"
 authors = [
     { name = "AlexCodesThings" }
 ]
-dependencies = []
+dependencies = [
+    "prompt-toolkit>=3.0,<4",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -21,6 +23,12 @@ dev = [
 ]
 desktop-preview = [
     "PySide6>=6.8,<7",
+]
+voice = [
+    "faster-whisper>=1.1,<2",
+    "numpy>=1.26,<3",
+    "sherpa-onnx>=1.10,<2",
+    "sounddevice>=0.5,<1",
 ]
 
 [project.scripts]

@@ -22,11 +22,20 @@ final class Protocol {
             "sleeping"
     ));
 
+    private static final Set<String> QUICK_ACTIONS = new HashSet<>(Arrays.asList(
+            "open_spotify",
+            "open_youtube"
+    ));
+
     private Protocol() {
     }
 
     static boolean isExpression(String value) {
         return value != null && EXPRESSIONS.contains(value);
+    }
+
+    static boolean isQuickAction(String value) {
+        return value != null && QUICK_ACTIONS.contains(value);
     }
 
     static float clamp(float value, float minimum, float maximum) {

@@ -35,6 +35,8 @@ final class SignalServer {
 
         void onSpeechEnded();
 
+        void onQuickActionResult(long requestId, boolean success, String message);
+
         void onProtocolError(String message);
     }
 
@@ -123,6 +125,38 @@ final class SignalServer {
             send(message);
         } catch (JSONException | IOException ignored) {
             // The heartbeat path will reconnect and receive a snapshot if needed.
+        }
+    }
+
+    boolean sendQuickAction(String action, long requestId) {
+        if (!authenticatedClient || !Protocol.isQuickAction(action) || requestId <= 0L) {
+            return false;
+        }
+        JSONObject message = new JSONObject();
+        try {
+            message.put("type", "quick_action");
+            message.put("action", action);
+            message.put("request_id", requestId);
+            send(message);
+            return true;
+        } catch (JSONException | IOException exception) {
+            Log.w(TAG, "Could not send tablet quick action", exception);
+            return false;
+        }
+    }
+
+    void sendFaceWake() {
+        if (!authenticatedClient) {
+            return;
+        }
+        JSONObject message = new JSONObject();
+        try {
+            message.put("type", "face_wake");
+            send(message);
+        } catch (JSONException | IOException exception) {
+            // The visual response is always local and instant. This message is
+            // only a best-effort state sync for the next reconnect snapshot.
+            Log.i(TAG, "Could not synchronise the local face wake", exception);
         }
     }
 
@@ -275,6 +309,9 @@ final class SignalServer {
                 float level = Protocol.clamp((float) message.optDouble("value", 0.0), 0f, 1f);
                 post(() -> listener.onSpeechLevel(level));
                 break;
+            case "quick_action_result":
+                applyQuickActionResult(message);
+                break;
             default:
                 reportProtocolError("Unknown message type was ignored: " + type);
         }
@@ -320,6 +357,22 @@ final class SignalServer {
             return;
         }
         post(() -> listener.onExpression(expression));
+    }
+
+    private void applyQuickActionResult(JSONObject message) {
+        long requestId = message.optLong("request_id", -1L);
+        String status = message.optString("status", "failed");
+        String detail = message.optString("message", "");
+        if (requestId <= 0L || !("success".equals(status) || "failed".equals(status))) {
+            reportProtocolError("Invalid quick-action result was rejected");
+            return;
+        }
+        if (detail.length() > 160) {
+            detail = detail.substring(0, 160);
+        }
+        boolean success = "success".equals(status);
+        String safeDetail = detail;
+        post(() -> listener.onQuickActionResult(requestId, success, safeDetail));
     }
 
     private void send(JSONObject message) throws IOException {

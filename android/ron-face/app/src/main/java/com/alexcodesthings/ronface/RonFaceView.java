@@ -13,9 +13,15 @@ import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.SystemClock;
 import android.util.AttributeSet;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 
 final class RonFaceView extends View {
+    interface FaceTapListener {
+        void onFaceTapped(float normalisedX, float normalisedY);
+    }
+
     private static final int SQUIRCLE_POINTS = 72;
     private static final RectF UNIT_EYE_RECT = new RectF(-0.5f, -0.5f, 0.5f, 0.5f);
     private static final RectF UNIT_SHADER_RECT = new RectF(0f, 0f, 1f, 1f);
@@ -78,8 +84,23 @@ final class RonFaceView extends View {
     private float microSmile = 1f;
     private float errorMix = 0f;
     private float blinkDip = 0f;
+    private float tapOffsetX = 0f;
+    private float tapOffsetY = 0f;
+    private float tapTilt = 0f;
+    private float tapScaleX = 1f;
+    private float tapScaleY = 1f;
+    private float tapLeftEyeOpen = 1f;
+    private float tapRightEyeOpen = 1f;
+    private float tapMouthOpen = 0f;
+    private float tapGlowBoost = 0f;
     private String decoration = "none";
     private float decorationProgress = 0f;
+    private FaceTapListener faceTapListener;
+    private float touchDownX;
+    private float touchDownY;
+    private long touchDownAt;
+    private boolean touchMoved;
+    private int touchSlop;
 
     RonFaceView(Context context) {
         super(context);
@@ -95,7 +116,10 @@ final class RonFaceView extends View {
         setBackgroundColor(Color.rgb(2, 6, 11));
         setKeepScreenOn(true);
         setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        setContentDescription("Ron's animated face");
+        setClickable(true);
+        setFocusable(true);
+        setContentDescription("Ron's animated face. Tap to interact.");
+        touchSlop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
         buildUnitSquircle();
         eyeHighlightShader = new RadialGradient(
                 0f,
@@ -160,6 +184,13 @@ final class RonFaceView extends View {
 
         drawBackground(canvas);
 
+        // Tap reactions use their own transform channels. This keeps a playful
+        // physical response independent from blink, speech and expression poses.
+        canvas.save();
+        canvas.translate(tapOffsetX * scale, tapOffsetY * scale);
+        canvas.rotate(tapTilt, centreX, centreY);
+        canvas.scale(tapScaleX, tapScaleY, centreX, centreY);
+
         float breathing = (
                 (float) Math.sin(seconds * 0.82f) * 0.55f
                         + (float) Math.sin(seconds * 1.37f + 1.1f) * 0.22f
@@ -205,7 +236,7 @@ final class RonFaceView extends View {
                 scale,
                 leftEyeTilt + microLeftTilt,
                 leftEyeScale * microLeftScale,
-                leftEyeOpen,
+                leftEyeOpen * tapLeftEyeOpen,
                 glowDrift
         );
         drawEye(
@@ -216,11 +247,12 @@ final class RonFaceView extends View {
                 scale,
                 rightEyeTilt + microRightTilt,
                 rightEyeScale * microRightScale,
-                rightEyeOpen,
+                rightEyeOpen * tapRightEyeOpen,
                 glowDrift
         );
         drawMouth(canvas, faceX, restingEyeTop, eyeHeight, scale);
         drawDecoration(canvas, faceX, restingEyeTop, eyeHeight, scale);
+        canvas.restore();
 
         long delay = decorationProgress > 0.001f
                 ? 33L
@@ -235,6 +267,60 @@ final class RonFaceView extends View {
     protected void onDetachedFromWindow() {
         removeCallbacks(frameRunnable);
         super.onDetachedFromWindow();
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        if (!isEnabled()) {
+            return false;
+        }
+
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                touchDownX = event.getX();
+                touchDownY = event.getY();
+                touchDownAt = SystemClock.elapsedRealtime();
+                touchMoved = false;
+                setPressed(true);
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                float deltaX = event.getX() - touchDownX;
+                float deltaY = event.getY() - touchDownY;
+                if (deltaX * deltaX + deltaY * deltaY > touchSlop * touchSlop) {
+                    touchMoved = true;
+                    setPressed(false);
+                }
+                return true;
+            case MotionEvent.ACTION_UP:
+                setPressed(false);
+                long heldFor = SystemClock.elapsedRealtime() - touchDownAt;
+                if (!touchMoved && heldFor <= 550L) {
+                    performClick();
+                    if (faceTapListener != null && getWidth() > 0 && getHeight() > 0) {
+                        faceTapListener.onFaceTapped(
+                                Protocol.clamp(event.getX() / getWidth(), 0f, 1f),
+                                Protocol.clamp(event.getY() / getHeight(), 0f, 1f)
+                        );
+                    }
+                }
+                return true;
+            case MotionEvent.ACTION_CANCEL:
+                setPressed(false);
+                touchMoved = true;
+                return true;
+            default:
+                return super.onTouchEvent(event);
+        }
+    }
+
+    @Override
+    public boolean performClick() {
+        super.performClick();
+        return true;
+    }
+
+    void setFaceTapListener(FaceTapListener listener) {
+        faceTapListener = listener;
     }
 
     private void drawBackground(Canvas canvas) {
@@ -293,7 +379,10 @@ final class RonFaceView extends View {
             float blinkVisibility,
             float glowDrift
     ) {
-        float strength = Math.max(0f, Math.min(1f, glowStrength + glowDrift));
+        float strength = Math.max(
+                0f,
+                Math.min(1f, glowStrength + tapGlowBoost + glowDrift)
+        );
         float visibility = Protocol.clamp(blinkVisibility, 0f, 1f);
         // Retain a trace of light through a blink so the eyes feel softly covered
         // rather than abruptly powered off.
@@ -495,7 +584,7 @@ final class RonFaceView extends View {
         float mouthY = eyeTop + eyeHeight + (53f + mouthOffsetY) * scale;
         float mouthCentreX = centreX + mouthOffsetX * scale;
         float halfWidth = 28f * mouthWidthScale * scale;
-        float openAmount = Protocol.clamp(mouthOpen, 0f, 1f);
+        float openAmount = Protocol.clamp(Math.max(mouthOpen, tapMouthOpen), 0f, 1f);
         float openBlend = smoothStep(0.025f, 0.17f, openAmount);
 
         canvas.save();
@@ -1074,6 +1163,24 @@ final class RonFaceView extends View {
     void setErrorMix(float value) { errorMix = value; invalidate(); }
     float getBlinkDip() { return blinkDip; }
     void setBlinkDip(float value) { blinkDip = value; invalidate(); }
+    float getTapOffsetX() { return tapOffsetX; }
+    void setTapOffsetX(float value) { tapOffsetX = value; invalidate(); }
+    float getTapOffsetY() { return tapOffsetY; }
+    void setTapOffsetY(float value) { tapOffsetY = value; invalidate(); }
+    float getTapTilt() { return tapTilt; }
+    void setTapTilt(float value) { tapTilt = value; invalidate(); }
+    float getTapScaleX() { return tapScaleX; }
+    void setTapScaleX(float value) { tapScaleX = value; invalidate(); }
+    float getTapScaleY() { return tapScaleY; }
+    void setTapScaleY(float value) { tapScaleY = value; invalidate(); }
+    float getTapLeftEyeOpen() { return tapLeftEyeOpen; }
+    void setTapLeftEyeOpen(float value) { tapLeftEyeOpen = value; invalidate(); }
+    float getTapRightEyeOpen() { return tapRightEyeOpen; }
+    void setTapRightEyeOpen(float value) { tapRightEyeOpen = value; invalidate(); }
+    float getTapMouthOpen() { return tapMouthOpen; }
+    void setTapMouthOpen(float value) { tapMouthOpen = value; invalidate(); }
+    float getTapGlowBoost() { return tapGlowBoost; }
+    void setTapGlowBoost(float value) { tapGlowBoost = value; invalidate(); }
     String getDecoration() { return decoration; }
     void setDecoration(String value) { decoration = value; invalidate(); }
     float getDecorationProgress() { return decorationProgress; }

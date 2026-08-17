@@ -20,6 +20,32 @@ function Stop-WithMessage {
     throw $Message
 }
 
+function Invoke-AdbCapture {
+    param([string[]]$Arguments)
+
+    # Windows PowerShell reports native stderr as ErrorRecord objects. ADB uses
+    # stderr for harmless service messages such as "daemon not running", so a
+    # temporary Continue policy prevents those messages from becoming fatal.
+    $previousPreference = $ErrorActionPreference
+    $exitCode = -1
+    $outputLines = @()
+    try {
+        $ErrorActionPreference = "Continue"
+        $outputLines = @(
+            & $adb @Arguments 2>&1 |
+                ForEach-Object { $_.ToString() }
+        )
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        Text = ($outputLines -join [Environment]::NewLine)
+    }
+}
+
 Write-Host "`nRon Face: safe build and install" -ForegroundColor Cyan
 
 if (-not (Test-Path $gradleFile)) {
@@ -95,7 +121,19 @@ Write-Host "Gradle: $($gradleExecutable.FullName)"
 Write-Host "SDK:    $sdkRoot"
 
 Write-Host "`nChecking connected tablets..." -ForegroundColor Cyan
-$deviceText = & $adb devices 2>&1 | Out-String
+$deviceProbe = Invoke-AdbCapture -Arguments @("devices")
+if ($deviceProbe.ExitCode -ne 0) {
+    # A short retry also covers the first-ever daemon startup on slower PCs.
+    Start-Sleep -Milliseconds 700
+    $deviceProbe = Invoke-AdbCapture -Arguments @("devices")
+}
+if ($deviceProbe.ExitCode -ne 0) {
+    Stop-WithMessage "ADB could not check connected devices: $($deviceProbe.Text)"
+}
+$deviceText = $deviceProbe.Text
+if ($deviceText -match 'daemon not running|daemon started successfully') {
+    Write-Host "ADB service started successfully." -ForegroundColor DarkGray
+}
 $readyDevices = @()
 foreach ($line in ($deviceText -split "`r?`n")) {
     if ($line -match '^(\S+)\s+device\b') {
@@ -125,14 +163,18 @@ if (Test-Path $buildLog) {
     Remove-Item -LiteralPath $buildLog -Force
 }
 Push-Location $androidProject
-$oldPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
 try {
-    & $gradleExecutable.FullName --no-daemon --console=plain clean assembleDebug 2>&1 |
+    # Gradle writes harmless compiler notes to stderr. Run it through cmd.exe
+    # so stderr is merged before PowerShell sees it; real failure is still
+    # determined by Gradle's numeric exit code below.
+    $gradleCommand = (
+        "call `"$($gradleExecutable.FullName)`" " +
+        "--no-daemon --console=plain clean assembleDebug 2>&1"
+    )
+    & $env:ComSpec /d /s /c $gradleCommand |
         Tee-Object -FilePath $buildLog
     $buildExitCode = $LASTEXITCODE
 } finally {
-    $ErrorActionPreference = $oldPreference
     Pop-Location
 }
 
@@ -160,16 +202,11 @@ if (Test-Path $buildLog) {
 Write-Host "APK built: $apkFile" -ForegroundColor Green
 Write-Host "`nInstalling without clearing Ron Face data..." -ForegroundColor Cyan
 
-$oldPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-try {
-    $installOutput = & $adb @adbTarget install -r $apkFile 2>&1 | Out-String
-} finally {
-    $ErrorActionPreference = $oldPreference
-}
+$installProbe = Invoke-AdbCapture -Arguments ($adbTarget + @("install", "-r", $apkFile))
+$installOutput = $installProbe.Text
 Write-Host $installOutput
 
-if ($installOutput -notmatch 'Success') {
+if ($installProbe.ExitCode -ne 0 -or $installOutput -notmatch 'Success') {
     if ($installOutput -match 'INSTALL_FAILED_UPDATE_INCOMPATIBLE') {
         Stop-WithMessage (
             "The installed app has a different signature. Uninstall it manually " +
@@ -179,10 +216,20 @@ if ($installOutput -notmatch 'Success') {
     Stop-WithMessage "ADB rejected the APK: $installOutput"
 }
 
-& $adb @adbTarget shell am start -n $componentName | Out-Host
+$launchProbe = Invoke-AdbCapture -Arguments ($adbTarget + @("shell", "am", "start", "-n", $componentName))
+if (-not [string]::IsNullOrWhiteSpace($launchProbe.Text)) {
+    Write-Host $launchProbe.Text
+}
+if ($launchProbe.ExitCode -ne 0) {
+    Stop-WithMessage "Ron Face installed but could not be opened: $($launchProbe.Text)"
+}
 Start-Sleep -Seconds 2
 
-$packageDetails = & $adb @adbTarget shell dumpsys package $packageName 2>&1 | Out-String
+$packageProbe = Invoke-AdbCapture -Arguments ($adbTarget + @("shell", "dumpsys", "package", $packageName))
+if ($packageProbe.ExitCode -ne 0) {
+    Stop-WithMessage "Ron Face opened, but its installed version could not be verified."
+}
+$packageDetails = $packageProbe.Text
 if ($packageDetails -notmatch "versionName=$([regex]::Escape($expectedVersion))") {
     Stop-WithMessage "Installed package does not report version $expectedVersion."
 }

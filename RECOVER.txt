@@ -1,0 +1,47 @@
+RON v0.1.14 - RECOVERY HOTFIX
+=============================
+
+WHY THIS IS NEEDED
+------------------
+The quick-actions overlay replaced a newer tablet_client.py. Your current
+face.py expects FaceConnectionUpdate from that newer file, so Python stops
+during import. The Gradle compiler note is harmless, but the previous installer
+allowed PowerShell to treat it as a NativeCommandError.
+
+RECOVER RON'S PYTHON FILE
+-------------------------
+Run these commands from C:\Development\Fun-Projects\RonPersonal while Ron is
+stopped:
+
+  New-Item -ItemType Directory -Force .\data\recovery | Out-Null
+  Copy-Item .\src\ron\display\tablet_client.py .\data\recovery\tablet_client.quick-actions-broken.py -Force
+  git restore --source=HEAD -- .\src\ron\display\tablet_client.py
+  python -m ron
+
+If Ron starts, press Ctrl+C to stop him again. Do not extract the earlier
+v0.1.14 Quick Actions ZIP again, because it contains the incompatible Python
+file.
+
+If git says tablet_client.py is not tracked, or Ron still reports
+FaceConnectionUpdate after the restore, stop and do not delete anything. The
+original file will need to be recovered from the most recent project ZIP.
+
+INSTALLER HOTFIX
+----------------
+This recovery ZIP contains only scripts\install_tablet_face.ps1. Extract the
+ZIP directly into the RonPersonal folder and replace that one script. Then run:
+
+  powershell -ExecutionPolicy Bypass -File .\scripts\install_tablet_face.ps1
+
+The installer now merges Gradle's warning stream before PowerShell sees it.
+Real Gradle failures still stop the install by their numeric exit code.
+
+FILES NEEDED FOR THE FINAL QUICK-ACTION MERGE
+---------------------------------------------
+Once Ron starts again, create this small archive and attach it in the chat:
+
+  Compress-Archive -Path .\src\ron\display\face.py,.\src\ron\display\tablet_client.py -DestinationPath .\RonDisplayCurrent.zip -Force
+
+Those exact current files are needed to merge Spotify and YouTube controls
+without removing the newer face-connection warning system.
+

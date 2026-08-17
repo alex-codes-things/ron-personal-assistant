@@ -171,12 +171,14 @@ final class FaceAnimator {
     private AnimatorSet entryAnimator;
     private AnimatorSet decorationAnimator;
     private AnimatorSet tongueAnimator;
+    private AnimatorSet touchAnimator;
     private final int[] lastVariants = {-1, -1, -1, -1, -1, -1, -1, -1};
     private int activeVariant;
     private boolean speaking;
     private boolean receivingSpeechLevels;
     private boolean pendingAcknowledgement;
     private long lastSpeechLevelAt;
+    private long lastFaceTapAt;
 
     private final Runnable blinkRunnable = this::blinkNaturally;
     private final Runnable driftRunnable = this::animateDrift;
@@ -209,6 +211,9 @@ final class FaceAnimator {
         String previous = face.getExpression();
         boolean repeated = expression.equals(previous);
         face.setExpression(expression);
+        cancel(touchAnimator);
+        touchAnimator = null;
+        resetTouchChannels();
         cancel(poseAnimator);
         cancel(driftAnimator);
         cancel(accentAnimator);
@@ -442,6 +447,28 @@ final class FaceAnimator {
         }
     }
 
+    void onFaceTapped(float normalisedX, float normalisedY, boolean mayWake) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastFaceTapAt < 240L) {
+            return;
+        }
+        lastFaceTapAt = now;
+
+        float safeX = Protocol.clamp(normalisedX, 0f, 1f);
+        float safeY = Protocol.clamp(normalisedY, 0f, 1f);
+        boolean wasSleeping = "sleeping".equals(face.getExpression());
+
+        if (wasSleeping && mayWake) {
+            // Move into the normal state first so the existing eyelid system
+            // performs a real opening motion instead of flipping the eyes on.
+            setExpression("idle");
+            playWakeTap(safeX, safeY);
+            return;
+        }
+
+        playGentleTap(safeX, safeY, wasSleeping);
+    }
+
     void destroy() {
         handler.removeCallbacksAndMessages(null);
         cancel(poseAnimator);
@@ -453,6 +480,187 @@ final class FaceAnimator {
         cancel(entryAnimator);
         cancel(decorationAnimator);
         cancel(tongueAnimator);
+        cancel(touchAnimator);
+    }
+
+    private void playGentleTap(float normalisedX, float normalisedY, boolean staySleeping) {
+        cancel(touchAnimator);
+        touchAnimator = null;
+        resetTouchChannels();
+
+        float awayX = tapAwayX(normalisedX, 7.2f);
+        float awayY = (0.5f - normalisedY) * 5.5f;
+        float tilt = -awayX * 0.31f;
+        float leftSquint = staySleeping ? 1f : (normalisedX < 0.5f ? 0.68f : 0.87f);
+        float rightSquint = staySleeping ? 1f : (normalisedX >= 0.5f ? 0.68f : 0.87f);
+
+        AnimatorSet receiveTap = touchPhase(
+                awayX,
+                awayY,
+                tilt,
+                1.018f,
+                staySleeping ? 0.975f : 0.955f,
+                leftSquint,
+                rightSquint,
+                staySleeping ? 0.07f : 0.20f,
+                staySleeping ? 0.02f : 0.10f,
+                92L,
+                SOFT
+        );
+        AnimatorSet softBounce = touchPhase(
+                -awayX * 0.20f,
+                -1.8f,
+                -tilt * 0.20f,
+                0.996f,
+                1.018f,
+                staySleeping ? 1f : 1.025f,
+                staySleeping ? 1f : 1.025f,
+                0.035f,
+                staySleeping ? 0.01f : 0.035f,
+                175L,
+                SPRING
+        );
+        AnimatorSet settle = touchPhase(
+                0f, 0f, 0f, 1f, 1f, 1f, 1f, 0f, 0f, 220L, SMOOTH
+        );
+
+        AnimatorSet reaction = new AnimatorSet();
+        reaction.playSequentially(receiveTap, softBounce, settle);
+        finishTouchAnimation(reaction);
+        if (!staySleeping) {
+            playDecoration("attention", 680L);
+        }
+    }
+
+    private void playWakeTap(float normalisedX, float normalisedY) {
+        cancel(touchAnimator);
+        touchAnimator = null;
+        resetTouchChannels();
+
+        float awayX = tapAwayX(normalisedX, 6.2f);
+        float awayY = 2.5f + (0.5f - normalisedY) * 3.5f;
+        float tilt = -awayX * 0.28f;
+
+        AnimatorSet surprised = touchPhase(
+                awayX,
+                awayY,
+                tilt,
+                1.02f,
+                0.94f,
+                0.88f,
+                0.88f,
+                0.24f,
+                0.18f,
+                115L,
+                SOFT
+        );
+        AnimatorSet awakeBounce = touchPhase(
+                -awayX * 0.16f,
+                -3.4f,
+                -tilt * 0.16f,
+                0.99f,
+                1.045f,
+                1.04f,
+                1.04f,
+                0.07f,
+                0.08f,
+                210L,
+                SPRING
+        );
+        AnimatorSet settle = touchPhase(
+                0f, 0f, 0f, 1f, 1f, 1f, 1f, 0f, 0f, 270L, SMOOTH
+        );
+
+        AnimatorSet reaction = new AnimatorSet();
+        reaction.playSequentially(surprised, awakeBounce, pause(55L), settle);
+        finishTouchAnimation(reaction);
+        playDecoration("attention", 860L);
+    }
+
+    private float tapAwayX(float normalisedX, float maximum) {
+        float away = (0.5f - normalisedX) * maximum * 2f;
+        if (Math.abs(away) < 2.8f) {
+            away = random.nextBoolean() ? 2.8f : -2.8f;
+        }
+        return away;
+    }
+
+    private AnimatorSet touchPhase(
+            float offsetX,
+            float offsetY,
+            float tilt,
+            float scaleX,
+            float scaleY,
+            float leftEyeOpen,
+            float rightEyeOpen,
+            float mouthOpen,
+            float glowBoost,
+            long duration,
+            Interpolator interpolator
+    ) {
+        AnimatorSet phase = new AnimatorSet();
+        phase.playTogether(
+                animate(face::getTapOffsetX, face::setTapOffsetX, offsetX, duration, interpolator),
+                animate(face::getTapOffsetY, face::setTapOffsetY, offsetY, duration, interpolator),
+                animate(face::getTapTilt, face::setTapTilt, tilt, duration, interpolator),
+                animate(face::getTapScaleX, face::setTapScaleX, scaleX, duration, interpolator),
+                animate(face::getTapScaleY, face::setTapScaleY, scaleY, duration, interpolator),
+                animate(
+                        face::getTapLeftEyeOpen,
+                        face::setTapLeftEyeOpen,
+                        leftEyeOpen,
+                        duration,
+                        interpolator
+                ),
+                animate(
+                        face::getTapRightEyeOpen,
+                        face::setTapRightEyeOpen,
+                        rightEyeOpen,
+                        duration,
+                        interpolator
+                ),
+                animate(
+                        face::getTapMouthOpen,
+                        face::setTapMouthOpen,
+                        mouthOpen,
+                        duration,
+                        interpolator
+                ),
+                animate(
+                        face::getTapGlowBoost,
+                        face::setTapGlowBoost,
+                        glowBoost,
+                        duration,
+                        interpolator
+                )
+        );
+        return phase;
+    }
+
+    private void finishTouchAnimation(AnimatorSet reaction) {
+        reaction.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (touchAnimator == reaction) {
+                    resetTouchChannels();
+                    touchAnimator = null;
+                }
+            }
+        });
+        touchAnimator = reaction;
+        reaction.start();
+    }
+
+    private void resetTouchChannels() {
+        face.setTapOffsetX(0f);
+        face.setTapOffsetY(0f);
+        face.setTapTilt(0f);
+        face.setTapScaleX(1f);
+        face.setTapScaleY(1f);
+        face.setTapLeftEyeOpen(1f);
+        face.setTapRightEyeOpen(1f);
+        face.setTapMouthOpen(0f);
+        face.setTapGlowBoost(0f);
     }
 
     private Pose poseFor(String expression, int variant) {

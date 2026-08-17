@@ -10,8 +10,8 @@ android {
         applicationId "com.alexcodesthings.ronface"
         minSdk 22
         targetSdk 35
-        versionCode 11
-        versionName "0.1.10"
+        versionCode 17
+        versionName "0.1.16"
     }
 
     buildTypes {

@@ -10,6 +10,7 @@ import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 
+@SuppressWarnings("deprecation")
 public final class MainActivity extends Activity implements SignalServer.Listener {
     private static final String TAG = "RonFaceActivity";
     private static final String PREFERENCES = "ron_face_private";
@@ -20,6 +21,7 @@ public final class MainActivity extends Activity implements SignalServer.Listene
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private RonFaceView faceView;
+    private RonTabletPager tabletPager;
     private FaceAnimator animator;
     private SignalServer signalServer;
     private BatteryHealthMonitor batteryMonitor;
@@ -58,7 +60,9 @@ public final class MainActivity extends Activity implements SignalServer.Listene
 
         faceView = new RonFaceView(this);
         animator = new FaceAnimator(faceView);
-        setContentView(faceView);
+        faceView.setFaceTapListener(this::onFaceTapped);
+        tabletPager = new RonTabletPager(this, faceView, this::dispatchQuickAction);
+        setContentView(tabletPager);
 
         storeTokenFromIntent(getIntent());
         startSignalServer();
@@ -87,6 +91,15 @@ public final class MainActivity extends Activity implements SignalServer.Listene
         if (hasFocus) {
             applyImmersiveMode();
         }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (tabletPager != null && tabletPager.isBlankPageVisible()) {
+            tabletPager.showFacePage();
+            return;
+        }
+        super.onBackPressed();
     }
 
     @Override
@@ -144,8 +157,34 @@ public final class MainActivity extends Activity implements SignalServer.Listene
     }
 
     @Override
+    public void onQuickActionResult(long requestId, boolean success, String message) {
+        if (tabletPager != null) {
+            tabletPager.onQuickActionResult(requestId, success, message);
+        }
+    }
+
+    @Override
     public void onProtocolError(String message) {
         Log.w(TAG, message);
+    }
+
+    private boolean dispatchQuickAction(String action, long requestId) {
+        return signalServer != null && signalServer.sendQuickAction(action, requestId);
+    }
+
+    private void onFaceTapped(float normalisedX, float normalisedY) {
+        if (animator == null) {
+            return;
+        }
+        // Thermal and critical-battery sleep is a safety state, so a tap may
+        // still produce a tiny response but cannot force the display awake.
+        boolean wokeFromSleep = !protectiveSleep
+                && faceView != null
+                && "sleeping".equals(faceView.getExpression());
+        animator.onFaceTapped(normalisedX, normalisedY, !protectiveSleep);
+        if (wokeFromSleep && signalServer != null) {
+            signalServer.sendFaceWake();
+        }
     }
 
     private void onBatteryHealth(int percent, boolean isCharging, float temperature) {

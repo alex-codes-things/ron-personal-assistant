@@ -9,6 +9,7 @@ import queue
 import secrets
 import socket
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -28,6 +29,11 @@ from ron.display.protocol import (
     ProtocolError,
     encode_message,
 )
+from ron.display.quick_actions import (
+    SUPPORTED_QUICK_ACTIONS,
+    DesktopQuickActions,
+    QuickActionResult,
+)
 
 
 class ConnectionStatus(StrEnum):
@@ -41,6 +47,18 @@ class ConnectionStatus(StrEnum):
     HANDSHAKING = "handshaking"
     READY = "ready"
     RETRYING = "retrying"
+
+
+@dataclass(frozen=True, slots=True)
+class FaceConnectionUpdate:
+    """One isolated notification when the tablet connection stage changes."""
+
+    status: ConnectionStatus
+    previous_status: ConnectionStatus = ConnectionStatus.STOPPED
+
+
+StatusListener = Callable[[FaceConnectionUpdate], None]
+QuickActionHandler = Callable[[str], QuickActionResult]
 
 
 @dataclass(slots=True)
@@ -83,11 +101,17 @@ class FaceSnapshot:
 class TabletFaceClient:
     """Own ADB discovery, pairing, transport, heartbeat and resynchronisation."""
 
-    def __init__(self, config: TabletClientConfig) -> None:
+    def __init__(
+        self,
+        config: TabletClientConfig,
+        *,
+        quick_action_handler: QuickActionHandler | None = None,
+    ) -> None:
         self.config = config
         self._logger = logging.getLogger(__name__)
         self._status = ConnectionStatus.STOPPED
         self._status_lock = threading.RLock()
+        self._status_listeners: list[StatusListener] = []
         self._state = FaceSnapshot()
         self._state_lock = threading.RLock()
         self._pending: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=128)
@@ -101,6 +125,9 @@ class TabletFaceClient:
         self._last_health_warning = 0.0
         self._serial = config.preferred_serial or self._load_saved_serial()
         self._pairing_token = self._load_or_create_token()
+        self._quick_action_handler = (
+            quick_action_handler or DesktopQuickActions().handle
+        )
 
     @property
     def status(self) -> ConnectionStatus:
@@ -110,6 +137,17 @@ class TabletFaceClient:
     @property
     def serial(self) -> str | None:
         return self._serial
+
+    def add_status_listener(self, listener: StatusListener) -> None:
+        """Subscribe once; a faulty listener cannot stop reconnection."""
+        with self._status_lock:
+            if listener not in self._status_listeners:
+                self._status_listeners.append(listener)
+
+    def remove_status_listener(self, listener: StatusListener) -> None:
+        with self._status_lock:
+            if listener in self._status_listeners:
+                self._status_listeners.remove(listener)
 
     def start(self) -> None:
         """Start reconnection in the background; never block Ron's main thread."""
@@ -302,12 +340,63 @@ class TabletFaceClient:
                     self._handle_device_health(message)
                 elif message_type == "request_snapshot":
                     self._send_snapshot(connection)
+                elif message_type == "quick_action":
+                    self._handle_quick_action(connection, message)
+                elif message_type == "face_wake":
+                    self._handle_face_wake()
 
             self._wake_event.wait(0.025)
             self._wake_event.clear()
 
     def _send_snapshot(self, connection: socket.socket) -> None:
         self._send(connection, self._build_snapshot_message())
+
+    def _handle_quick_action(
+        self,
+        connection: socket.socket,
+        message: dict[str, Any],
+    ) -> None:
+        request_id = message.get("request_id")
+        if (
+            not isinstance(request_id, int)
+            or isinstance(request_id, bool)
+            or request_id <= 0
+        ):
+            self._logger.warning("Rejected tablet quick action with an invalid request ID")
+            return
+
+        action = message.get("action")
+        if not isinstance(action, str) or action not in SUPPORTED_QUICK_ACTIONS:
+            result = QuickActionResult(False, "That tablet action is not allowed")
+        else:
+            try:
+                result = self._quick_action_handler(action)
+                if not isinstance(result, QuickActionResult):
+                    raise TypeError("Quick-action handler returned an invalid result")
+            except Exception:
+                self._logger.exception("Tablet quick-action handler failed safely")
+                result = QuickActionResult(False, "The laptop action failed safely")
+
+        self._send(
+            connection,
+            {
+                "type": "quick_action_result",
+                "request_id": request_id,
+                "status": "success" if result.success else "failed",
+                "message": result.message.strip()[:160],
+            },
+        )
+
+    def _handle_face_wake(self) -> None:
+        """Keep a locally awakened tablet in sync with future snapshots."""
+        with self._state_lock:
+            if self._state.expression is not FaceExpression.SLEEPING:
+                return
+            self._state.expression = FaceExpression.IDLE
+            self._state.speech_active = False
+            self._state.speech_level = 0.0
+            self._speech_dirty = False
+        self._logger.info("Tablet tap woke Ron's face")
 
     def _build_snapshot_message(self) -> dict[str, Any]:
         snapshot = self.snapshot()
@@ -438,10 +527,18 @@ class TabletFaceClient:
 
     def _set_status(self, status: ConnectionStatus) -> None:
         with self._status_lock:
-            changed = status is not self._status
+            previous = self._status
+            changed = status is not previous
             self._status = status
+            listeners = tuple(self._status_listeners) if changed else ()
         if changed:
             self._logger.info("Tablet face status: %s", status.value)
+            update = FaceConnectionUpdate(status, previous)
+            for listener in listeners:
+                try:
+                    listener(update)
+                except Exception:
+                    self._logger.exception("Tablet face status listener failed")
 
     def _next_sequence(self) -> int:
         with self._sequence_lock:
