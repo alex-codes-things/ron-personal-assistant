@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$VoiceModels = Join-Path $ProjectRoot "models\voice"
+$VoiceModels = Join-Path $ProjectRoot "runtime\models\voice"
 $KwsName = "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
 $KwsDirectory = Join-Path $VoiceModels $KwsName
 $KwsArchive = Join-Path $VoiceModels "$KwsName.tar.bz2"

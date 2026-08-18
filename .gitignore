@@ -29,11 +29,11 @@ credentials*.json
 *.pem
 *.key
 
-# Ron's personal and generated data
-data/
-models/
-recordings/
-logs/
+# Ron's personal/generated runtime data
+runtime/data/
+runtime/models/
+runtime/recordings/
+runtime/logs/
 *.db
 *.sqlite
 *.sqlite3
@@ -47,9 +47,9 @@ Thumbs.db
 desktop.ini
 
 # Android build output and local SDK paths
-android/**/.gradle/
-android/**/build/
-android/**/local.properties
+tablet/.gradle/
+tablet/**/build/
+tablet/local.properties
 *.apk
 *.aab
 *.backup-*

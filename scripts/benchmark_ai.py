@@ -28,7 +28,7 @@ def main() -> int:
 
         print(f"Warming {settings.model}; this can take longer on the first run...")
         report = run_benchmark(client)
-        destination = save_report(report, project_root / "data" / "benchmarks")
+        destination = save_report(report, project_root / "runtime" / "data" / "benchmarks")
     except SettingsError as error:
         print(f"Invalid AI configuration: {error}")
         return 2

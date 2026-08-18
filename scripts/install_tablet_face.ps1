@@ -5,7 +5,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$androidProject = Join-Path $ProjectRoot "android\ron-face"
+$androidProject = Join-Path $ProjectRoot "tablet"
 $gradleFile = Join-Path $androidProject "app\build.gradle"
 $apkFile = Join-Path $androidProject "app\build\outputs\apk\debug\app-debug.apk"
 $buildLog = Join-Path $ProjectRoot "ron-face-build-error.txt"

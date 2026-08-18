@@ -33,12 +33,12 @@ def main() -> int:
         settings = SpotifySettings(args.client_id.strip(), args.redirect_uri.strip())
     except ValueError as error:
         parser.error(str(error))
-    token_store = WindowsProtectedTokenStore(PROJECT_ROOT / "data" / "spotify_token.dat")
+    token_store = WindowsProtectedTokenStore(PROJECT_ROOT / "runtime" / "data" / "spotify_token.dat")
     if not token_store.supported:
         print("Secure Spotify setup is available on Windows only.")
         return 1
 
-    config_path = PROJECT_ROOT / "data" / "spotify_config.json"
+    config_path = PROJECT_ROOT / "runtime" / "data" / "spotify_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         json.dumps(

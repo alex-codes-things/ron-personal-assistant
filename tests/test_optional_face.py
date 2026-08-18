@@ -4,7 +4,7 @@ from pathlib import Path
 from ron.core import Coordinator
 from ron.display.face import TabletFaceDisplay
 from ron.display.tablet_client import ConnectionStatus, FaceConnectionUpdate
-from ron.interfaces.terminal import TerminalChat
+from ron.terminal import TerminalChat
 
 
 class FakeFaceClient:

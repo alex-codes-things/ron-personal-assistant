@@ -35,7 +35,8 @@ voice = [
 ron = "ron.__main__:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["ron*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

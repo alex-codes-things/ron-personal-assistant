@@ -4,7 +4,7 @@ from ron.ai import InferenceMetrics, InferenceResult
 from ron.assistant import RonAssistant
 from ron.chat import ChatService, ChatSettings, ConversationHistory
 from ron.core import Coordinator, EventType
-from ron.interfaces import TerminalChat
+from ron.terminal import TerminalChat
 from ron.routing import PromptRouter
 
 

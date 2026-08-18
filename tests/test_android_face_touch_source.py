@@ -6,8 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 JAVA = (
     ROOT
-    / "android"
-    / "ron-face"
+    / "tablet"
     / "app"
     / "src"
     / "main"
