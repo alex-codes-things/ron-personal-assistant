@@ -7,6 +7,7 @@ import java.util.Set;
 final class Protocol {
     static final int VERSION = 1;
     static final int PORT = 8765;
+    static final int DISCOVERY_PORT = 8766;
     static final int MAX_MESSAGE_BYTES = 8192;
     static final int HANDSHAKE_TIMEOUT_MS = 5000;
     static final long HEARTBEAT_TIMEOUT_MS = 6500L;

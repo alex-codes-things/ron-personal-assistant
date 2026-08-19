@@ -5,6 +5,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -166,7 +167,7 @@ final class SignalServer {
                 ServerSocket server = new ServerSocket();
                 server.setReuseAddress(true);
                 server.bind(new InetSocketAddress(
-                        InetAddress.getByName("127.0.0.1"),
+                        InetAddress.getByName("0.0.0.0"),
                         Protocol.PORT
                 ), 1);
                 serverSocket = server;
@@ -203,7 +204,7 @@ final class SignalServer {
             while (running.get() && !socket.isClosed()) {
                 String line = readBoundedLine(input, lineBuffer);
                 if (line == null) {
-                    throw new EOFException("Computer closed the USB signal stream");
+                    throw new EOFException("Computer closed the signal stream");
                 }
                 lastMessageAt = SystemClock.elapsedRealtime();
 
@@ -262,8 +263,14 @@ final class SignalServer {
         try {
             ready.put("type", "ready");
             ready.put("protocol", Protocol.VERSION);
-            ready.put("device", "nexus-7");
+            ready.put("device", "ron-face");
+            ready.put("device_type", "display");
+            ready.put("friendly_name", "Ron Face");
             ready.put("face_version", BuildConfig.VERSION_NAME);
+            ready.put("capabilities", new JSONArray()
+                    .put("face")
+                    .put("quick_actions")
+                    .put("battery_health"));
             send(ready);
             return true;
         } catch (JSONException | IOException exception) {

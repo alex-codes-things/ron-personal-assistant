@@ -20,6 +20,7 @@ from ron.assistant import RonAssistant
 from ron.chat import ChatService
 from ron.core import Coordinator, EventType, FaceExpression, RonEvent
 from ron.display import TabletFaceDisplay
+from ron.network import NetworkService
 from ron.terminal import TerminalChat
 from ron.reminders import ReminderManager
 from ron.routing import PromptRouter
@@ -33,7 +34,12 @@ class RonApplication:
     def __init__(self, project_root: Path | None = None) -> None:
         self.project_root = project_root or Path(__file__).resolve().parents[1]
         self.coordinator = Coordinator()
-        self.face = TabletFaceDisplay(self.coordinator, self.project_root)
+        self.network = NetworkService(self.coordinator)
+        self.face = TabletFaceDisplay(
+            self.coordinator,
+            self.project_root,
+            network_service=self.network,
+        )
         self.ai_client = OllamaClient()
         self.inference_scheduler = InferenceScheduler()
         self.chat_ai = ScheduledOllamaClient(
@@ -45,7 +51,8 @@ class RonApplication:
         self.planning_ai = ScheduledOllamaClient(
             self.ai_client, self.inference_scheduler, InferencePriority.PLANNING
         )
-        self.reminders = ReminderManager(self.project_root / "runtime" / "data" / "reminders.sqlite")
+        reminder_path = self.project_root / "runtime" / "data" / "reminders.sqlite"
+        self.reminders = ReminderManager(reminder_path)
         self.chat = ChatService(self.coordinator, client=self.chat_ai)
         self.router = PromptRouter(self.routing_ai)
         self.tools = build_default_registry(self.project_root, self.reminders)
@@ -108,6 +115,17 @@ class RonApplication:
             return
         self.reminders.start()
         self.agent.start()
+        try:
+            self.network.start()
+        except Exception:
+            self._logger.warning(
+                "Ron Network could not start; local Ron is unaffected",
+                exc_info=True,
+            )
+            self.terminal.post_system_notice(
+                "[NETWORK OFFLINE] Ron is still fully working locally. "
+                "Network devices will be unavailable until the network service recovers."
+            )
         self.face.start()
         self.voice.start()
         if self._voice_configuration_error is not None:
@@ -129,6 +147,10 @@ class RonApplication:
             return
         self.voice.stop()
         self.face.stop()
+        try:
+            self.network.stop()
+        except Exception:
+            self._logger.debug("Ron Network did not stop cleanly", exc_info=True)
         self.agent.stop()
         self.reminders.stop()
         self._started = False
@@ -147,9 +169,11 @@ class RonApplication:
         ai_health = self.inference_scheduler.health_label()
         face_state = self.face.connection_label()
         voice_state = self.voice.status_label()
+        network_state = self.network.status_label()
         return (
             f"Local AI: {ai_health}; scheduler: {ai_state} ({queued} queued); tablet face: "
-            f"{face_state}; voice: {voice_state}; {self.agent.capability_status()}"
+            f"{face_state}; network: {network_state}; voice: {voice_state}; "
+            f"{self.agent.capability_status()}"
         )
 
     def _handle_voice_input(self, voice_input: VoiceInput) -> VoiceReply:

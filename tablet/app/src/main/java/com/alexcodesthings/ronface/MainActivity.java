@@ -24,6 +24,7 @@ public final class MainActivity extends Activity implements SignalServer.Listene
     private RonTabletPager tabletPager;
     private FaceAnimator animator;
     private SignalServer signalServer;
+    private DiscoveryResponder discoveryResponder;
     private BatteryHealthMonitor batteryMonitor;
     private boolean computerConnected;
     private boolean protectiveSleep;
@@ -66,6 +67,8 @@ public final class MainActivity extends Activity implements SignalServer.Listene
 
         storeTokenFromIntent(getIntent());
         startSignalServer();
+        discoveryResponder = new DiscoveryResponder();
+        discoveryResponder.start();
         batteryMonitor = new BatteryHealthMonitor(this, this::onBatteryHealth);
         batteryMonitor.start();
         handler.post(safetyCheck);
@@ -107,6 +110,9 @@ public final class MainActivity extends Activity implements SignalServer.Listene
         handler.removeCallbacksAndMessages(null);
         if (batteryMonitor != null) {
             batteryMonitor.stop();
+        }
+        if (discoveryResponder != null) {
+            discoveryResponder.stop();
         }
         if (signalServer != null) {
             signalServer.stop();

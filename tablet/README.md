@@ -1,13 +1,14 @@
 # Ron Face for Android
 
 This is a native Java/Canvas face for Android 5.1.1 and newer. It has no web
-view, browser runtime or Wi-Fi listener. A server binds only to
-`127.0.0.1:8765`; the computer reaches that private port through `adb forward`
-over USB.
+view or browser runtime. The authenticated signal server can be reached on the
+local LAN at TCP `8765`, while USB `adb forward` remains available for initial
+pairing and fallback. A tiny UDP responder on `8766` lets Ron discover the
+tablet without exposing its pairing secret.
 
 ## Build settings
 
-- Current Ron Face version: 0.1.16
+- Current Ron Face version: 0.1.17
 - Android Gradle Plugin 8.7.3
 - Gradle 8.9
 - JDK 17
@@ -38,7 +39,7 @@ small. Ron's face tile returns to the face page, Spotify opens the desktop app,
 and YouTube opens a new Brave tab on the laptop. Android's Back action remains
 a third safe way to return.
 
-Quick actions travel back through the authenticated USB signal stream. The
+Quick actions travel back through the authenticated signal stream, over LAN or USB. The
 tablet can send only fixed allowlisted action IDs—never commands, paths or
 arbitrary URLs. Each tile ignores repeat taps while waiting and shows a brief
 success or failure outline. Requests time out safely after four seconds.
@@ -50,7 +51,7 @@ startled bounce and a real eyelid-opening transition. Thermal or critical-
 battery protective sleep deliberately cannot be overridden by touch. Long
 presses and finger movement are rejected, and the corner navigation arrow sits
 above the face view so using it never triggers the tap reaction. The animation
-always starts locally with no USB wait; when connected, a tiny best-effort wake
+always starts locally with no network or USB wait; when connected, a tiny best-effort wake
 message keeps the laptop's next face snapshot in sync.
 
 The Windows installer captures ADB's normal first-start daemon messages without
@@ -75,7 +76,7 @@ edge horizontal.
   for medium syllables and becoming taller for louder ones.
 - Playful happy variants can show a short, automatically retracting tongue peek.
 - Sequential animations capture their real value when each stage begins.
-- USB signal input is buffered and reuses its bounded line buffer.
+- Signal input is buffered and reuses its bounded line buffer.
 
 Once Android Studio has downloaded the SDK and Gradle, build and install future
 versions from the repository root with:
@@ -83,3 +84,8 @@ versions from the repository root with:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_tablet_face.ps1
 ```
+
+
+## Ron Network transport
+
+The signal server accepts LAN connections only after the same pairing-token handshake used over USB. Discovery advertises only the device ID, app version, port and capabilities. A fresh install may use USB once so Ron can provision the token; normal reconnects can then use the LAN.

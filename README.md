@@ -5,14 +5,14 @@ The project is organised so the root stays readable and generated files stay out
 
 ## Project map
 
-- **`ron/`** — Python assistant: agent, AI, chat, voice and display connection
+- **`ron/`** — Python assistant: agent, AI, chat, voice, network awareness and display connection
 - **`tablet/`** — Nexus 7 Android face and quick-action app
 - **`runtime/`** — generated/private data, downloaded models, logs and recordings
 - **`scripts/`** — setup, diagnostics, benchmarks and installers
 - **`tests/`** — automated tests
 - **`docs/`** — architecture and structure notes
 
-See [`docs/STRUCTURE.md`](docs/STRUCTURE.md) for the detailed map.
+See [`docs/STRUCTURE.md`](docs/STRUCTURE.md) for the detailed map and [`docs/NETWORK.md`](docs/NETWORK.md) for the optional LAN layer.
 
 ## Start Ron
 
@@ -39,3 +39,5 @@ Ron keeps machine-specific/generated content under `runtime/` instead of scatter
 ## Tablet
 
 Open the `tablet/` directory in Android Studio if you want to edit the Nexus app directly. The normal installer is `scripts/install_tablet_face.ps1`.
+
+After pairing, the Nexus can connect over the local LAN. Ron discovers it automatically when router broadcasts are allowed; `RON_FACE_HOST` can be set as a manual fallback. The existing USB/ADB transport remains available and local Ron does not depend on the tablet or network being online.

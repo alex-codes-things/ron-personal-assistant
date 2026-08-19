@@ -27,9 +27,14 @@ ron/
 ├── reminders.py   # Reminder storage/scheduling
 ├── agent/         # Planning, task execution and approved computer tools
 ├── ai/            # Ollama/local-model client and inference scheduling
-├── display/       # USB/tablet communication
+├── display/       # Nexus face state + LAN/USB tablet transport
+├── network/       # Device registry, LAN discovery, health + shared protocol
 ├── integrations/  # External app integrations such as Spotify
 └── voice/         # Microphone, wake word, VAD and Whisper transcription
 ```
 
 The goal is simple: files that are part of Ron's normal runtime live in `ron/`; generated files live in `runtime/`; device code lives in `tablet/`; one-off developer helpers live in `scripts/`.
+
+## Ron Network
+
+The optional `ron/network/` layer discovers and tracks local companion devices without putting network calls in the path of local assistant commands. See [`NETWORK.md`](NETWORK.md).

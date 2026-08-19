@@ -34,6 +34,7 @@ runtime/data/
 runtime/models/
 runtime/recordings/
 runtime/logs/
+runtime/network/
 *.db
 *.sqlite
 *.sqlite3

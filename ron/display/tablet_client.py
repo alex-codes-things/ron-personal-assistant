@@ -1,4 +1,4 @@
-"""Persistent, self-healing USB connection to Ron's native tablet face."""
+"""Persistent tablet-face connection with LAN first and safe USB fallback."""
 
 from __future__ import annotations
 
@@ -59,19 +59,25 @@ class FaceConnectionUpdate:
 
 StatusListener = Callable[[FaceConnectionUpdate], None]
 QuickActionHandler = Callable[[str], QuickActionResult]
+EndpointProvider = Callable[[], tuple[str, int] | None]
+NetworkConnectedHandler = Callable[[str | None, int | None, dict[str, Any]], None]
+NetworkHeartbeatHandler = Callable[[dict[str, Any]], None]
+NetworkDisconnectedHandler = Callable[[], None]
 
 
 @dataclass(slots=True)
 class TabletClientConfig:
-    """All replaceable details of the current ADB transport."""
+    """Replaceable LAN and USB details for the Nexus face transport."""
 
     adb_path: str | None = None
     preferred_serial: str | None = None
+    manual_host: str | None = None
+    lan_enabled: bool = True
     component: str = "com.alexcodesthings.ronface/.MainActivity"
     device_port: int = 8765
     token_file: Path = Path("data/face_pairing_token")
     serial_file: Path = Path("data/tablet_serial.json")
-    connect_timeout: float = 3.0
+    connect_timeout: float = 2.0
     handshake_timeout: float = 4.0
     heartbeat_interval: float = 2.0
     heartbeat_timeout: float = 6.5
@@ -81,9 +87,19 @@ class TabletClientConfig:
     def from_environment(cls, project_root: Path) -> TabletClientConfig:
         """Build configuration while keeping secrets and serials out of Git."""
         data_directory = project_root / "runtime" / "data"
+        raw_port = (os.getenv("RON_FACE_PORT") or "8765").strip()
+        try:
+            device_port = int(raw_port)
+        except ValueError:
+            device_port = 8765
+        device_port = max(1, min(65_535, device_port))
+        network_enabled = (os.getenv("RON_NETWORK_ENABLED") or "true").strip().lower()
         return cls(
             adb_path=os.getenv("RON_ADB_PATH") or None,
             preferred_serial=os.getenv("RON_TABLET_SERIAL") or None,
+            manual_host=(os.getenv("RON_FACE_HOST") or "").strip() or None,
+            lan_enabled=network_enabled not in {"0", "false", "no", "off"},
+            device_port=device_port,
             token_file=data_directory / "face_pairing_token",
             serial_file=data_directory / "tablet_serial.json",
         )
@@ -99,13 +115,17 @@ class FaceSnapshot:
 
 
 class TabletFaceClient:
-    """Own ADB discovery, pairing, transport, heartbeat and resynchronisation."""
+    """Own tablet pairing, LAN/USB transport, heartbeat and resynchronisation."""
 
     def __init__(
         self,
         config: TabletClientConfig,
         *,
         quick_action_handler: QuickActionHandler | None = None,
+        endpoint_provider: EndpointProvider | None = None,
+        network_connected_handler: NetworkConnectedHandler | None = None,
+        network_heartbeat_handler: NetworkHeartbeatHandler | None = None,
+        network_disconnected_handler: NetworkDisconnectedHandler | None = None,
     ) -> None:
         self.config = config
         self._logger = logging.getLogger(__name__)
@@ -125,9 +145,12 @@ class TabletFaceClient:
         self._last_health_warning = 0.0
         self._serial = config.preferred_serial or self._load_saved_serial()
         self._pairing_token = self._load_or_create_token()
-        self._quick_action_handler = (
-            quick_action_handler or DesktopQuickActions().handle
-        )
+        self._quick_action_handler = quick_action_handler or DesktopQuickActions().handle
+        self._endpoint_provider = endpoint_provider
+        self._network_connected_handler = network_connected_handler
+        self._network_heartbeat_handler = network_heartbeat_handler
+        self._network_disconnected_handler = network_disconnected_handler
+        self._active_transport = "none"
 
     @property
     def status(self) -> ConnectionStatus:
@@ -217,47 +240,89 @@ class TabletFaceClient:
             local_port: int | None = None
             active_serial: str | None = None
             connection: socket.socket | None = None
+            lan_endpoint: tuple[str, int] | None = None
+            decoder: JsonLineDecoder | None = None
+            ready: dict[str, Any] | None = None
+            network_announced = False
 
             try:
                 self._set_status(ConnectionStatus.WAITING_FOR_DEVICE)
-                bridge = AdbBridge(self.config.adb_path)
-                device = bridge.resolve_device(self._serial)
-                active_serial = device.serial
-                if self._serial != active_serial:
-                    self._serial = active_serial
-                    self._save_serial(active_serial)
+                lan_endpoint = self._resolve_lan_endpoint()
+                if lan_endpoint is not None:
+                    try:
+                        self._set_status(ConnectionStatus.CONNECTING)
+                        connection = socket.create_connection(
+                            lan_endpoint,
+                            timeout=self.config.connect_timeout,
+                        )
+                        connection.settimeout(0.20)
+                        self._active_transport = "lan"
+                        self._set_status(ConnectionStatus.HANDSHAKING)
+                        decoder = JsonLineDecoder()
+                        ready = self._perform_handshake(connection, decoder)
+                    except (OSError, ProtocolError, TimeoutError) as error:
+                        self._logger.debug(
+                            "Tablet LAN endpoint %s:%s is unavailable: %s",
+                            lan_endpoint[0],
+                            lan_endpoint[1],
+                            error,
+                        )
+                        if connection is not None:
+                            try:
+                                connection.close()
+                            except OSError:
+                                pass
+                        connection = None
+                        decoder = None
+                        ready = None
+                        self._active_transport = "none"
 
-                self._set_status(ConnectionStatus.STARTING_APP)
-                bridge.launch_face_app(
-                    active_serial,
-                    self.config.component,
-                    self._pairing_token,
-                )
+                if connection is None:
+                    bridge = AdbBridge(self.config.adb_path)
+                    device = bridge.resolve_device(self._serial)
+                    active_serial = device.serial
+                    if self._serial != active_serial:
+                        self._serial = active_serial
+                        self._save_serial(active_serial)
 
-                local_port = bridge.create_forward(
-                    active_serial,
-                    self.config.device_port,
-                )
-                self._set_status(ConnectionStatus.CONNECTING)
-                connection = socket.create_connection(
-                    ("127.0.0.1", local_port),
-                    timeout=self.config.connect_timeout,
-                )
-                connection.settimeout(0.20)
+                    self._set_status(ConnectionStatus.STARTING_APP)
+                    bridge.launch_face_app(
+                        active_serial,
+                        self.config.component,
+                        self._pairing_token,
+                    )
+                    local_port = bridge.create_forward(
+                        active_serial,
+                        self.config.device_port,
+                    )
+                    self._set_status(ConnectionStatus.CONNECTING)
+                    connection = socket.create_connection(
+                        ("127.0.0.1", local_port),
+                        timeout=self.config.connect_timeout,
+                    )
+                    connection.settimeout(0.20)
+                    self._active_transport = "usb"
+                    self._set_status(ConnectionStatus.HANDSHAKING)
+                    decoder = JsonLineDecoder()
+                    ready = self._perform_handshake(connection, decoder)
 
-                self._set_status(ConnectionStatus.HANDSHAKING)
-                decoder = JsonLineDecoder()
-                self._perform_handshake(connection, decoder)
+                if decoder is None or ready is None:
+                    raise ProtocolError("Tablet transport did not complete setup")
+
                 self._clear_pending()
                 self._send_snapshot(connection)
                 self._set_status(ConnectionStatus.READY)
+                network_announced = True
+                self._notify_network_connected(lan_endpoint, ready)
                 backoff = 0.5
                 self._connected_loop(connection, decoder)
             except AdbUnavailableError as error:
-                self._logger.error("Tablet face cannot start: %s", error)
+                self._logger.warning(
+                    "Tablet face is not reachable by LAN and ADB is unavailable: %s", error
+                )
                 self._set_status(ConnectionStatus.RETRYING)
             except DeviceUnauthorizedError as error:
-                self._logger.warning("Tablet face is waiting for permission: %s", error)
+                self._logger.warning("Tablet face is waiting for USB permission: %s", error)
                 self._set_status(ConnectionStatus.UNAUTHORIZED)
             except (AdbError, OSError, ProtocolError, TimeoutError) as error:
                 self._logger.warning("Tablet face connection unavailable: %s", error)
@@ -273,17 +338,41 @@ class TabletFaceClient:
                         pass
                 if bridge is not None and active_serial is not None and local_port is not None:
                     bridge.remove_forward(active_serial, local_port)
+                if network_announced:
+                    self._notify_network_disconnected()
+                self._active_transport = "none"
 
             if self._stop_event.is_set():
                 break
             self._interruptible_wait(backoff + secrets.randbelow(250) / 1000)
             backoff = min(10.0, backoff * 1.8)
 
+    def _resolve_lan_endpoint(self) -> tuple[str, int] | None:
+        if not self.config.lan_enabled:
+            return None
+        if self.config.manual_host:
+            return self.config.manual_host, self.config.device_port
+        if self._endpoint_provider is None:
+            return None
+        try:
+            endpoint = self._endpoint_provider()
+        except Exception:
+            self._logger.debug("Tablet endpoint provider failed safely", exc_info=True)
+            return None
+        if endpoint is None:
+            return None
+        host, port = endpoint
+        if not isinstance(host, str) or not host.strip():
+            return None
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65_535:
+            return None
+        return host.strip(), port
+
     def _perform_handshake(
         self,
         connection: socket.socket,
         decoder: JsonLineDecoder,
-    ) -> None:
+    ) -> dict[str, Any]:
         self._send(
             connection,
             {
@@ -300,9 +389,9 @@ class TabletFaceClient:
                     continue
                 if message.get("protocol") != PROTOCOL_VERSION:
                     raise ProtocolError("Tablet uses an incompatible protocol version")
-                if message.get("device") != "nexus-7":
-                    raise ProtocolError("Connected app did not identify as Ron's Nexus 7 face")
-                return
+                if message.get("device") not in {"ron-face", "nexus-7"}:
+                    raise ProtocolError("Connected app did not identify as Ron's tablet face")
+                return message
         raise TimeoutError("Tablet did not complete the face-protocol handshake")
 
     def _connected_loop(
@@ -336,8 +425,17 @@ class TabletFaceClient:
                 message_type = message.get("type")
                 if message_type == "pong":
                     last_pong = monotonic()
+                    self._notify_network_heartbeat({"transport": self._active_transport})
                 elif message_type == "device_health":
                     self._handle_device_health(message)
+                    self._notify_network_heartbeat(
+                        {
+                            "transport": self._active_transport,
+                            "battery_percent": message.get("battery_percent"),
+                            "charging": message.get("charging"),
+                            "temperature_c": message.get("temperature_c"),
+                        }
+                    )
                 elif message_type == "request_snapshot":
                     self._send_snapshot(connection)
                 elif message_type == "quick_action":
@@ -480,6 +578,41 @@ class TabletFaceClient:
                 battery if isinstance(battery, int) else "unknown",
             )
             self._last_health_warning = now
+
+    def _notify_network_connected(
+        self,
+        lan_endpoint: tuple[str, int] | None,
+        ready: dict[str, Any],
+    ) -> None:
+        if self._network_connected_handler is None:
+            return
+        ip_address = lan_endpoint[0] if self._active_transport == "lan" and lan_endpoint else None
+        port = lan_endpoint[1] if self._active_transport == "lan" and lan_endpoint else None
+        metadata = {
+            "transport": self._active_transport,
+            "face_version": ready.get("face_version"),
+        }
+        try:
+            self._network_connected_handler(ip_address, port, metadata)
+        except Exception:
+            self._logger.debug("Tablet network-connected callback failed safely", exc_info=True)
+
+    def _notify_network_heartbeat(self, metadata: dict[str, Any]) -> None:
+        if self._network_heartbeat_handler is None:
+            return
+        safe_metadata = {key: value for key, value in metadata.items() if value is not None}
+        try:
+            self._network_heartbeat_handler(safe_metadata)
+        except Exception:
+            self._logger.debug("Tablet network heartbeat callback failed safely", exc_info=True)
+
+    def _notify_network_disconnected(self) -> None:
+        if self._network_disconnected_handler is None:
+            return
+        try:
+            self._network_disconnected_handler()
+        except Exception:
+            self._logger.debug("Tablet network disconnect callback failed safely", exc_info=True)
 
     def _load_or_create_token(self) -> str:
         path = self.config.token_file

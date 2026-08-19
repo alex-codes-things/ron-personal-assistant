@@ -31,6 +31,12 @@ class EventType(StrEnum):
     SPEECH_STARTED = "speech.started"
     SPEECH_LEVEL = "speech.level"
     SPEECH_ENDED = "speech.ended"
+    DEVICE_CONNECTED = "network.device_connected"
+    DEVICE_DISCONNECTED = "network.device_disconnected"
+    DEVICE_RECONNECTED = "network.device_reconnected"
+    DEVICE_DEGRADED = "network.device_degraded"
+    NETWORK_AVAILABLE = "network.available"
+    NETWORK_UNAVAILABLE = "network.unavailable"
     SHUTDOWN = "system.shutdown"
 
 

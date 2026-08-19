@@ -9,6 +9,7 @@ from collections.abc import Callable
 from math import isfinite
 from pathlib import Path
 from time import monotonic
+from typing import TYPE_CHECKING, Any
 
 from ron.core import Coordinator
 from ron.core import EventType, FaceExpression, RonEvent
@@ -18,6 +19,10 @@ from ron.display.tablet_client import (
     TabletClientConfig,
     TabletFaceClient,
 )
+
+
+if TYPE_CHECKING:
+    from ron.network import NetworkService
 
 NoticeListener = Callable[[str], None]
 
@@ -42,12 +47,24 @@ class TabletFaceDisplay:
         project_root: Path,
         *,
         client: TabletFaceClient | None = None,
+        network_service: NetworkService | None = None,
         reminder_interval_seconds: float | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._logger = logging.getLogger(__name__)
+        self._network_service = network_service
         self.client = client or TabletFaceClient(
             TabletClientConfig.from_environment(project_root),
+            endpoint_provider=(network_service.face_endpoint if network_service else None),
+            network_connected_handler=(
+                self._network_face_connected if network_service else None
+            ),
+            network_heartbeat_handler=(
+                self._network_face_heartbeat if network_service else None
+            ),
+            network_disconnected_handler=(
+                self._network_face_disconnected if network_service else None
+            ),
         )
         self._notice_listeners: list[NoticeListener] = []
         self._notice_lock = threading.RLock()
@@ -100,7 +117,7 @@ class TabletFaceDisplay:
             return "connecting"
         if status is ConnectionStatus.STOPPED:
             return "stopped"
-        return "offline—plug in the Nexus 7 when convenient"
+        return "offline—LAN reconnecting; USB remains available as fallback"
 
     def _handle_connection_update(self, update: FaceConnectionUpdate) -> None:
         if update.status is ConnectionStatus.READY:
@@ -147,8 +164,8 @@ class TabletFaceDisplay:
             )
         else:
             message = (
-                "[FACE OFFLINE] Ron is still fully working. Plug in the Nexus 7 "
-                "when convenient."
+                "[FACE OFFLINE] Ron is still fully working. The Nexus will reconnect "
+                "over the LAN when available; USB can still be used as a fallback."
             )
         self._emit_notice(message)
 
@@ -160,6 +177,32 @@ class TabletFaceDisplay:
                 listener(message)
             except Exception:
                 self._logger.exception("Tablet face notice listener failed")
+
+    def _network_face_connected(
+        self,
+        ip_address: str | None,
+        port: int | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        if self._network_service is None:
+            return
+        self._network_service.note_device_connected(
+            "ron-face",
+            ip_address=ip_address,
+            port=port,
+            device_type="display",
+            friendly_name="Ron Face",
+            capabilities={"face", "quick_actions", "battery_health"},
+            metadata=metadata,
+        )
+
+    def _network_face_heartbeat(self, metadata: dict[str, Any]) -> None:
+        if self._network_service is not None:
+            self._network_service.note_device_heartbeat("ron-face", metadata=metadata)
+
+    def _network_face_disconnected(self) -> None:
+        if self._network_service is not None:
+            self._network_service.note_device_disconnected("ron-face")
 
     def _handle_expression(self, event: RonEvent) -> None:
         value = event.payload.get("expression", FaceExpression.IDLE)

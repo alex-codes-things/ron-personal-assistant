@@ -139,3 +139,136 @@ def test_faulty_status_listener_does_not_break_other_listeners() -> None:
         client._set_status(ConnectionStatus.RETRYING)
 
         assert received == [ConnectionStatus.RETRYING]
+
+
+def test_manual_lan_endpoint_is_preferred_over_discovery_provider() -> None:
+    with TemporaryDirectory() as directory_name:
+        client = TabletFaceClient(
+            TabletClientConfig(
+                manual_host="192.168.1.44",
+                device_port=8765,
+                token_file=Path(directory_name) / "pairing_token",
+                serial_file=Path(directory_name) / "tablet_serial.json",
+            ),
+            endpoint_provider=lambda: ("192.168.1.55", 9000),
+        )
+
+        assert client._resolve_lan_endpoint() == ("192.168.1.44", 8765)
+
+
+def test_discovered_lan_endpoint_is_used_when_no_manual_host_exists() -> None:
+    with TemporaryDirectory() as directory_name:
+        client = TabletFaceClient(
+            TabletClientConfig(
+                token_file=Path(directory_name) / "pairing_token",
+                serial_file=Path(directory_name) / "tablet_serial.json",
+            ),
+            endpoint_provider=lambda: ("192.168.1.55", 8765),
+        )
+
+        assert client._resolve_lan_endpoint() == ("192.168.1.55", 8765)
+
+
+def test_network_callbacks_are_isolated_from_tablet_transport() -> None:
+    with TemporaryDirectory() as directory_name:
+        client = TabletFaceClient(
+            TabletClientConfig(
+                token_file=Path(directory_name) / "pairing_token",
+                serial_file=Path(directory_name) / "tablet_serial.json",
+            ),
+            network_heartbeat_handler=lambda metadata: (_ for _ in ()).throw(
+                RuntimeError("simulated network callback failure")
+            ),
+        )
+
+        client._notify_network_heartbeat({"transport": "lan"})
+
+
+def test_lan_transport_can_be_disabled_without_affecting_usb_client() -> None:
+    with TemporaryDirectory() as directory_name:
+        client = TabletFaceClient(
+            TabletClientConfig(
+                manual_host="192.168.1.44",
+                lan_enabled=False,
+                token_file=Path(directory_name) / "pairing_token",
+                serial_file=Path(directory_name) / "tablet_serial.json",
+            ),
+            endpoint_provider=lambda: ("192.168.1.55", 8765),
+        )
+
+        assert client._resolve_lan_endpoint() is None
+
+
+def test_failed_lan_connection_falls_back_to_existing_usb_transport(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    with TemporaryDirectory() as directory_name:
+        client = TabletFaceClient(
+            TabletClientConfig(
+                manual_host="192.168.1.44",
+                token_file=Path(directory_name) / "pairing_token",
+                serial_file=Path(directory_name) / "tablet_serial.json",
+            )
+        )
+        calls: list[tuple[str, object]] = []
+
+        class FakeSocket:
+            def settimeout(self, value) -> None:
+                calls.append(("timeout", value))
+
+            def close(self) -> None:
+                calls.append(("close", None))
+
+        class FakeBridge:
+            def __init__(self, path) -> None:
+                calls.append(("bridge", path))
+
+            def resolve_device(self, serial):
+                calls.append(("resolve", serial))
+                return SimpleNamespace(serial="tablet-1")
+
+            def launch_face_app(self, serial, component, token) -> None:
+                calls.append(("launch", serial))
+
+            def create_forward(self, serial, device_port) -> int:
+                calls.append(("forward", device_port))
+                return 54321
+
+            def remove_forward(self, serial, local_port) -> None:
+                calls.append(("remove", local_port))
+
+        connection_attempts: list[tuple[str, int]] = []
+
+        def connect(endpoint, timeout):
+            del timeout
+            connection_attempts.append(endpoint)
+            if endpoint == ("192.168.1.44", 8765):
+                raise OSError("simulated LAN outage")
+            return FakeSocket()
+
+        monkeypatch.setattr("ron.display.tablet_client.AdbBridge", FakeBridge)
+        monkeypatch.setattr("ron.display.tablet_client.socket.create_connection", connect)
+        monkeypatch.setattr(
+            client,
+            "_perform_handshake",
+            lambda connection, decoder: {
+                "type": "ready",
+                "protocol": 1,
+                "device": "ron-face",
+            },
+        )
+        monkeypatch.setattr(client, "_send_snapshot", lambda connection: None)
+
+        def finish(connection, decoder) -> None:
+            client._stop_event.set()
+
+        monkeypatch.setattr(client, "_connected_loop", finish)
+
+        client._connection_worker()
+
+        assert connection_attempts == [
+            ("192.168.1.44", 8765),
+            ("127.0.0.1", 54321),
+        ]
+        assert ("launch", "tablet-1") in calls
+        assert ("remove", 54321) in calls
