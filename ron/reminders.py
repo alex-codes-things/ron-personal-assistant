@@ -26,7 +26,7 @@ class Reminder:
         return datetime.fromtimestamp(self.due_at).astimezone().strftime("%d %b %Y at %I:%M %p")
 
 
-ReminderListener = Callable[[Reminder], None]
+type ReminderListener = Callable[[Reminder], None]
 
 
 class ReminderManager:
@@ -37,6 +37,7 @@ class ReminderManager:
         self._notifications: queue.SimpleQueue[Reminder] = queue.SimpleQueue()
         self._listeners: list[ReminderListener] = []
         self._stop = False
+        self._change_version = 0
         self._worker: threading.Thread | None = None
         self._logger = logging.getLogger(__name__)
         self._initialise()
@@ -81,6 +82,7 @@ class ReminderManager:
             reminder_id = int(cursor.lastrowid)
         reminder = Reminder(reminder_id, clean_message, due_at, "pending")
         with self._condition:
+            self._change_version += 1
             self._condition.notify_all()
         return reminder
 
@@ -99,6 +101,7 @@ class ReminderManager:
                 )
                 row = (row[0], row[1], row[2], "cancelled")
         with self._condition:
+            self._change_version += 1
             self._condition.notify_all()
         return Reminder(int(row[0]), str(row[1]), float(row[2]), str(row[3]))
 
@@ -129,15 +132,18 @@ class ReminderManager:
             with self._condition:
                 if self._stop:
                     return
+                observed_version = self._change_version
             reminder = self._next_pending()
             if reminder is None:
                 with self._condition:
-                    self._condition.wait(timeout=30.0)
+                    if self._change_version == observed_version and not self._stop:
+                        self._condition.wait(timeout=30.0)
                 continue
             delay = reminder.due_at - time.time()
             if delay > 0:
                 with self._condition:
-                    self._condition.wait(timeout=min(delay, 30.0))
+                    if self._change_version == observed_version and not self._stop:
+                        self._condition.wait(timeout=min(delay, 30.0))
                 continue
             with self._connection() as connection:
                 changed = connection.execute(

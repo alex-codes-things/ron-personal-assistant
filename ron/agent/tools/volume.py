@@ -19,7 +19,7 @@ from ron.agent.models import (
 )
 from ron.agent.registry import ToolSpec
 
-AudioRunner = Callable[..., dict[str, object]]
+type AudioRunner = Callable[..., dict[str, object]]
 
 
 def _powershell_runner(project_root: Path) -> AudioRunner:

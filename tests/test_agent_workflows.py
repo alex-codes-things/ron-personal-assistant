@@ -1,9 +1,10 @@
 import threading
 import time
+
 from ron.agent import (
     AgentPlan,
-    AgentPlanSource,
     AgentPlanner,
+    AgentPlanSource,
     AgentService,
     AgentTaskManager,
     AgentTaskStatus,
@@ -143,11 +144,16 @@ def test_spotify_tool_validates_query_and_reports_exact_track() -> None:
         def availability(self):
             return True, "ready"
 
-        def search_and_play(self, query: str):
+        def search_tracks(self, query: str, context: object):
+            del context
             assert query == "Galway Girl by Ed Sheeran"
-            return SpotifyTrack(
-                "Galway Girl", ("Ed Sheeran",), "spotify:track:allowed"
+            return (
+                SpotifyTrack("Galway Girl", ("Ed Sheeran",), "spotify:track:allowed"),
             )
+
+        def play_track(self, track: SpotifyTrack, context: object):
+            del context
+            assert track.uri == "spotify:track:allowed"
 
     registry = ToolRegistry()
     registry.register(build_spotify_tool(lambda: FakeSpotify()))
@@ -166,8 +172,12 @@ def test_named_spotify_request_runs_as_background_task() -> None:
         def availability(self):
             return True, "ready"
 
-        def search_and_play(self, query: str):
-            return SpotifyTrack(query, ("Artist",), "spotify:track:allowed")
+        def search_tracks(self, query: str, context: object):
+            del context
+            return (SpotifyTrack(query, ("Artist",), "spotify:track:allowed"),)
+
+        def play_track(self, track: SpotifyTrack, context: object):
+            del track, context
 
     registry = ToolRegistry()
     registry.register(build_spotify_tool(lambda: FakeSpotify()))

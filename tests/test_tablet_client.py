@@ -4,13 +4,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ron.core import FaceExpression
+from ron.display.quick_actions import QuickActionResult
 from ron.display.tablet_client import (
     ConnectionStatus,
     FaceConnectionUpdate,
     TabletClientConfig,
     TabletFaceClient,
 )
-from ron.display.quick_actions import QuickActionResult
 
 
 def create_client(directory: Path) -> TabletFaceClient:

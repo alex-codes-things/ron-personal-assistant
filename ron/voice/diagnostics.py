@@ -85,4 +85,9 @@ class VoiceDiagnostics:
             return f"offline{detail}"
         if snapshot.state is VoiceState.STOPPED:
             return "stopped"
-        return f"{snapshot.state.value} on {snapshot.device}"
+        latency = (
+            f"; last ASR {snapshot.last_transcription_seconds:.2f}s"
+            if snapshot.last_transcription_seconds is not None
+            else ""
+        )
+        return f"{snapshot.state.value} on {snapshot.device}{latency}"

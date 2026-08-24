@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from ron.ai import OllamaClient, OllamaError
+from ron.ai import AIClient, AIError
+
 
 class RouteDestination(StrEnum):
     CHAT = "chat"
@@ -17,6 +19,9 @@ class RouteSource(StrEnum):
     DETERMINISTIC = "deterministic"
     LOCAL_MODEL = "local_model"
     SAFE_FALLBACK = "safe_fallback"
+
+
+type ActionResolver = Callable[[str], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,13 +196,13 @@ DIRECT_ACTION_RULES = _rules(
             False,
         ),
         (
-            r"\b(?:play|pause|resume|skip)\b.*\b"
+            r"\b(?:play|pause|resume|unpause|continue|carry\s+on|keep\s+playing|skip)\b.*\b"
             r"(?:song|music|track|spotify|video|youtube)\b",
             "The prompt requests media control.",
             False,
         ),
         (
-            r"^(?:play|pause|resume|next|skip|previous)(?:\s+.*)?$",
+            r"^(?:play|pause|resume|unpause|continue|next|skip|previous)(?:\s+.*)?$",
             "The prompt requests media playback or selection.",
             False,
         ),
@@ -262,11 +267,18 @@ messages, settings, or the computer. If the request requires any tool, choose AG
 class PromptRouter:
     """Classify prompts quickly without granting execution permission."""
 
-    def __init__(self, client: OllamaClient, max_prompt_characters: int = 6_000) -> None:
+    def __init__(
+        self,
+        client: AIClient,
+        max_prompt_characters: int = 6_000,
+        *,
+        action_resolver: ActionResolver | None = None,
+    ) -> None:
         if not 100 <= max_prompt_characters <= 64_000:
             raise ValueError("Router prompt limit is invalid")
         self.client = client
         self.max_prompt_characters = max_prompt_characters
+        self.action_resolver = action_resolver
 
     def route(self, prompt: str) -> RoutingDecision:
         clean_prompt = prompt.strip()
@@ -292,6 +304,28 @@ class PromptRouter:
         if obvious_chat is not None:
             return self._decision(RouteDestination.CHAT, obvious_chat, 0.96)
 
+        if self.action_resolver is not None and self._looks_like_command(route_text):
+            try:
+                can_handle = self.action_resolver(clean_prompt)
+            except Exception:
+                can_handle = False
+            if can_handle:
+                return RoutingDecision(
+                    destination=RouteDestination.AGENT,
+                    confidence=0.90,
+                    reason=(
+                        "Ron's semantic resolver mapped the ordinary phrasing to an "
+                        "approved action."
+                    ),
+                    source=RouteSource.LOCAL_MODEL,
+                )
+            return RoutingDecision(
+                destination=RouteDestination.CHAT,
+                confidence=0.72,
+                reason="No approved action matched, so Ron kept the request conversational.",
+                source=RouteSource.SAFE_FALLBACK,
+            )
+
         if AMBIGUOUS_REQUEST.search(route_text):
             return self._classify_with_local_model(clean_prompt)
 
@@ -301,6 +335,37 @@ class PromptRouter:
             reason="No external action or live-state requirement was detected.",
             source=RouteSource.DETERMINISTIC,
         )
+
+    @staticmethod
+    def _looks_like_command(prompt: str) -> bool:
+        """Catch short imperative phrasing without maintaining a verb dictionary."""
+        words = re.findall(r"[a-zA-Z][a-zA-Z'-]*", prompt)
+        if not words or len(words) > 24:
+            return False
+        if AMBIGUOUS_REQUEST.search(prompt):
+            return True
+        first = words[0].casefold()
+        conversational_starts = {
+            "i",
+            "i'm",
+            "im",
+            "we",
+            "we're",
+            "my",
+            "you",
+            "you're",
+            "it",
+            "this",
+            "that",
+            "there",
+            "yes",
+            "no",
+            "okay",
+            "ok",
+            "thanks",
+            "thank",
+        }
+        return first not in conversational_starts
 
     @staticmethod
     def _first_match(rules: tuple[RoutingRule, ...], prompt: str) -> RoutingRule | None:
@@ -329,7 +394,7 @@ class PromptRouter:
                 max_output_tokens=6,
                 temperature=0.0,
             )
-        except OllamaError:
+        except AIError:
             return RoutingDecision(
                 destination=RouteDestination.CHAT,
                 confidence=0.35,
@@ -349,7 +414,7 @@ class PromptRouter:
         return RoutingDecision(
             destination=destination,
             confidence=0.82,
-            reason="A local classifier resolved an ambiguous request.",
+            reason="The configured AI classifier resolved an ambiguous request.",
             source=RouteSource.LOCAL_MODEL,
             requires_confirmation=(
                 destination is RouteDestination.AGENT

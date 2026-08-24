@@ -47,6 +47,27 @@ def test_media_tool_sends_exact_allowlisted_virtual_key() -> None:
     assert keys == [MEDIA_KEYS["next"]]
 
 
+def test_media_resume_is_state_aware_and_never_toggles_playing_media() -> None:
+    keys: list[int] = []
+
+    class PlayingSession:
+        def state(self) -> str:
+            return "playing"
+
+        def perform(self, action: str) -> bool:
+            raise AssertionError(f"should not perform {action}")
+
+    registry = ToolRegistry()
+    registry.register(build_media_tool(keys.append, session_controller=PlayingSession()))
+
+    result = registry.execute("control_media", {"action": "resume"})
+
+    assert result.status is ToolStatus.SUCCESS
+    assert result.data["changed"] is False
+    assert result.data["state_aware"] is True
+    assert keys == []
+
+
 def test_volume_tool_sets_bounded_exact_level() -> None:
     calls: list[tuple[str, int | None]] = []
 
@@ -57,12 +78,8 @@ def test_volume_tool_sets_bounded_exact_level() -> None:
     registry = ToolRegistry()
     registry.register(build_volume_tool(Path("."), runner=runner))
 
-    result = registry.execute(
-        "control_volume", {"action": "set", "level": 30}
-    )
-    rejected = registry.execute(
-        "control_volume", {"action": "set", "level": 130}
-    )
+    result = registry.execute("control_volume", {"action": "set", "level": 30})
+    rejected = registry.execute("control_volume", {"action": "set", "level": 130})
 
     assert result.status is ToolStatus.SUCCESS
     assert result.message == "Volume set to 30%."

@@ -19,9 +19,9 @@ from ron.agent.models import (
     ToolTimedOut,
 )
 
-ToolHandler = Callable[..., ToolResult]
-ToolCompensator = Callable[..., ToolResult]
-AvailabilityCheck = Callable[[], tuple[bool, str]]
+type ToolHandler = Callable[..., ToolResult]
+type ToolCompensator = Callable[..., ToolResult]
+type AvailabilityCheck = Callable[[], tuple[bool, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +36,7 @@ class ToolSpec:
     availability: AvailabilityCheck | None = None
     compensator: ToolCompensator | None = None
     max_output_bytes: int = 64 * 1024
+    run_in_background: bool = False
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.replace("_", "").isalnum():
@@ -56,6 +57,7 @@ class ToolSpec:
             },
             "risk": self.risk.value,
             "requires_confirmation": self.requires_confirmation,
+            "run_in_background": self.run_in_background,
         }
 
 
@@ -75,6 +77,24 @@ class ToolRegistry:
 
     def schemas(self) -> list[dict[str, object]]:
         return [self._tools[name].schema() for name in self.names()]
+
+    def planner_schemas(self) -> list[dict[str, object]]:
+        """Return live capability schemas without granting the planner authority."""
+        schemas: list[dict[str, object]] = []
+        for name in self.names():
+            tool = self._tools[name]
+            available = True
+            reason = "ready"
+            if tool.availability is not None:
+                try:
+                    available, reason = tool.availability()
+                except Exception:
+                    available, reason = False, "availability check failed"
+            schema = tool.schema()
+            schema["available"] = bool(available)
+            schema["availability_reason"] = " ".join(str(reason).split())[:160]
+            schemas.append(schema)
+        return schemas
 
     def spec(self, tool_name: str) -> ToolSpec | None:
         return self._tools.get(tool_name)

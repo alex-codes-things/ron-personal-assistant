@@ -7,6 +7,7 @@ import sys
 import threading
 from collections.abc import Callable
 from contextlib import nullcontext
+from time import monotonic
 from typing import TextIO
 
 try:
@@ -16,13 +17,18 @@ except ImportError:  # Safe fallback for a partially installed environment.
     PromptSession = None
     patch_stdout = None
 
-from ron.ai import OllamaConnectionError, OllamaError
+from ron.ai import AIConnectionError, AIError
 from ron.assistant import RonAssistant
 from ron.routing import RouteDestination
 
-InputReader = Callable[[str], str]
-StopCheck = Callable[[], bool]
-StatusProvider = Callable[[], str]
+type InputReader = Callable[[str], str]
+type StopCheck = Callable[[], bool]
+type StatusProvider = Callable[[], str]
+
+TERMINAL_RULE = "─" * 62
+USER_PROMPT = "  You  › "
+RON_PREFIX = "  Ron  › "
+STATUS_PREFIX = "  Ron  · "
 
 
 class TerminalChat:
@@ -35,14 +41,19 @@ class TerminalChat:
         input_reader: InputReader = input,
         output: TextIO | None = None,
         status_provider: StatusProvider | None = None,
+        latency_provider: StatusProvider | None = None,
+        health_provider: StatusProvider | None = None,
     ) -> None:
         self.assistant = assistant
         self.chat = assistant.chat
         self._input = input_reader
         self._output = output or sys.stdout
         self._status_provider = status_provider
-        self._system_notices: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._latency_provider = latency_provider
+        self._health_provider = health_provider
+        self._system_notices: queue.Queue[str] = queue.Queue(maxsize=64)
         self._notice_lock = threading.RLock()
+        self._last_notice_at: dict[str, float] = {}
         self._running = False
         self._live = False
         self._session = None
@@ -54,6 +65,12 @@ class TerminalChat:
                 self._session = None
             self._live = self._session is not None
         self._last_progress: dict[int, tuple[object, ...]] = {}
+        self._response_started = False
+        self._status_lock = threading.RLock()
+        self._live_status = ""
+        add_progress_listener = getattr(self.assistant, "add_progress_listener", None)
+        if callable(add_progress_listener):
+            add_progress_listener(self._on_assistant_progress)
         if self.assistant.agent is not None:
             self.assistant.agent.add_progress_listener(self._on_task_progress)
             if self.assistant.agent.reminders is not None:
@@ -63,9 +80,7 @@ class TerminalChat:
         self._running = True
         try:
             context = (
-                patch_stdout(raw=True)
-                if self._live and patch_stdout is not None
-                else nullcontext()
+                patch_stdout(raw=True) if self._live and patch_stdout is not None else nullcontext()
             )
         except Exception:
             # Keep Ron usable if an unusual terminal loses its console handle.
@@ -84,10 +99,57 @@ class TerminalChat:
             return
         clean = clean[:500]
         with self._notice_lock:
-            if self._live and self._running:
-                print(f"Ron > {clean}", flush=True)
+            now = monotonic()
+            last = self._last_notice_at.get(clean)
+            if last is not None and now - last < 2.0:
                 return
-            self._system_notices.put(clean)
+            self._last_notice_at[clean] = now
+            if len(self._last_notice_at) > 128:
+                cutoff = now - 300.0
+                self._last_notice_at = {
+                    key: seen for key, seen in self._last_notice_at.items() if seen >= cutoff
+                }
+            if self._live and self._running:
+                self._clear_live_status()
+                self._notice_line(clean)
+                return
+            try:
+                self._system_notices.put_nowait(clean)
+            except queue.Full:
+                try:
+                    self._system_notices.get_nowait()
+                except queue.Empty:
+                    pass
+                self._system_notices.put_nowait(clean)
+
+    def post_status(self, message: str) -> None:
+        """Replace Ron's one live progress line instead of scrolling the terminal."""
+        clean = " ".join(message.strip().split())[:180]
+        if not clean:
+            return
+        if not self._live:
+            if self._running:
+                self._line(f"{STATUS_PREFIX}{clean}")
+            else:
+                self.post_system_notice(f"[WORKING] {clean}")
+            return
+        if not self._running:
+            self.post_system_notice(f"[WORKING] {clean}")
+            return
+        with self._status_lock:
+            self._live_status = clean
+            self._output.write(f"\r\033[2K{STATUS_PREFIX}{clean}")
+            self._output.flush()
+
+    def _clear_live_status(self) -> None:
+        if not self._live:
+            return
+        with self._status_lock:
+            if not self._live_status:
+                return
+            self._output.write("\r\033[2K")
+            self._output.flush()
+            self._live_status = ""
 
     @staticmethod
     def _can_use_live_terminal(
@@ -102,15 +164,19 @@ class TerminalChat:
             return False
 
     def _run_loop(self, should_stop: StopCheck) -> int:
-        self._line("Ron is ready. Type a message immediately, or /help for commands.")
+        self._line("")
+        self._line("  RON  ·  PERSONAL ASSISTANT")
+        self._line(f"  {TERMINAL_RULE}")
+        self._line("  Ready. Type a message, or use /help for commands.")
+        self._line("")
         while not should_stop():
             self._drain_system_notices()
             self._drain_task_notifications()
             try:
                 prompt = (
-                    self._session.prompt("You > ")
+                    self._session.prompt(USER_PROMPT)
                     if self._session is not None
-                    else self._input("You > ")
+                    else self._input(USER_PROMPT)
                 )
             except EOFError:
                 self._line("\nRon > Terminal input closed. Shutting down safely.")
@@ -126,34 +192,42 @@ class TerminalChat:
             if command_result is not None:
                 if command_result == "quit":
                     return 0
+                self._line("")
                 continue
 
-            self._write("Ron > ")
+            self._response_started = False
             try:
-                self.assistant.respond(clean_prompt, on_token=self._stream_token)
-            except OllamaConnectionError:
-                self._line(
-                    "I can't reach my local AI right now. Open Ollama and try again."
+                response = self.assistant.respond(
+                    clean_prompt,
+                    on_token=self._stream_token,
                 )
-            except OllamaError as error:
-                self._line(f"My local model returned an error: {error}")
+            except AIConnectionError as error:
+                self._line(f"Ron > I can't reach my AI right now: {error}")
+            except AIError as error:
+                self._line(f"Ron > My AI returned an error: {error}")
             except ValueError as error:
-                self._line(str(error))
+                self._line(f"Ron > {error}")
             except KeyboardInterrupt:
-                self._line("\nI stopped that response. Your previous chat is still safe.")
+                self._line("\nRon > I stopped that response. Your previous chat is still safe.")
             except Exception as error:
-                self._line(f"I hit an unexpected local error: {error}")
+                self._line(f"Ron > I hit an unexpected error: {error}")
             else:
-                self._line("")
+                if not self._response_started:
+                    self._line(f"Ron > {response.text}")
+            self._line("")
         return 0
 
     def _drain_system_notices(self) -> None:
+        drained = False
         while True:
             try:
                 notice = self._system_notices.get_nowait()
             except queue.Empty:
+                if drained:
+                    self._line("")
                 return
-            self._line(f"Ron > {notice}")
+            drained = True
+            self._notice_line(notice)
 
     def _handle_command(self, prompt: str) -> str | None:
         command = prompt.casefold()
@@ -166,11 +240,43 @@ class TerminalChat:
             return "handled"
         if command == "/help":
             self._line(
-                "Ron > Commands: /help, /clear, /status, /tools, /tasks, "
+                "Ron > Commands: /help, /clear, /status, /health, /tools, /tasks, "
                 "/task ID, /cancel ID, /diagnose ID, /reminders, "
-                "/cancel-reminder ID, /route PROMPT, /quit. "
+                "/cancel-reminder ID, /memories, /remember TEXT, /recall QUERY, "
+                "/forget QUERY, /route PROMPT, /latency, /quit. "
                 "You can also say 'Start a chat' or 'End chat'."
             )
+            return "handled"
+        if command == "/health":
+            message = (
+                self._health_provider()
+                if self._health_provider is not None
+                else "No runtime health monitor is connected."
+            )
+            self._line(f"Ron > {message}")
+            return "handled"
+        if command == "/latency":
+            message = (
+                self._latency_provider()
+                if self._latency_provider is not None
+                else "No latency diagnostics are connected."
+            )
+            self._line(f"Ron > {message}")
+            return "handled"
+        if command == "/memories":
+            self._run_memory_prompt("what do you remember")
+            return "handled"
+        if command.startswith("/remember "):
+            value = prompt[10:].strip()
+            self._run_memory_prompt(f"remember that {value}")
+            return "handled"
+        if command.startswith("/recall "):
+            value = prompt[8:].strip()
+            self._run_memory_prompt(f"what do you remember about {value}")
+            return "handled"
+        if command.startswith("/forget "):
+            value = prompt[8:].strip()
+            self._run_memory_prompt(f"forget about {value}")
             return "handled"
         if command == "/tools":
             if self.assistant.agent is None:
@@ -183,13 +289,10 @@ class TerminalChat:
             mode = "continuous chat" if self.chat.continuous else "ready"
             last_route = self.assistant.last_route
             route_text = (
-                f"; last route: {last_route.destination.value}"
-                if last_route is not None
-                else ""
+                f"; last route: {last_route.destination.value}" if last_route is not None else ""
             )
             base = (
-                f"Ron > Mode: {mode}; remembered turns: "
-                f"{self.chat.history.turn_count}{route_text}."
+                f"Ron > Mode: {mode}; remembered turns: {self.chat.history.turn_count}{route_text}."
             )
             details = self._status_provider() if self._status_provider is not None else ""
             self._line(f"{base} {details}".rstrip())
@@ -199,9 +302,7 @@ class TerminalChat:
                 self._line("Ron > No agent task manager is connected.")
             else:
                 snapshots = self.assistant.agent.task_snapshots()
-                self._line(
-                    f"Ron > {self.assistant.agent.describe_tasks(snapshots)}"
-                )
+                self._line(f"Ron > {self.assistant.agent.describe_tasks(snapshots)}")
             return "handled"
         if command.startswith("/task "):
             task_id = self._parse_task_id(prompt[6:])
@@ -280,8 +381,7 @@ class TerminalChat:
             decision = self.assistant.decide(candidate)
             confirmation = (
                 "; confirmation required"
-                if decision.requires_confirmation
-                and decision.destination is RouteDestination.AGENT
+                if decision.requires_confirmation and decision.destination is RouteDestination.AGENT
                 else ""
             )
             self._line(
@@ -292,9 +392,7 @@ class TerminalChat:
             return "handled"
         if command == "start a chat":
             self.chat.start_continuous_chat()
-            self._line(
-                "Ron > Continuous chat started. I'll keep more of our conversation in mind."
-            )
+            self._line("Ron > Continuous chat started. I'll keep more of our conversation in mind.")
             return "handled"
         if command in {"end chat", "stop chat"}:
             self.chat.end_continuous_chat()
@@ -302,8 +400,29 @@ class TerminalChat:
             return "handled"
         return None
 
+    def _run_memory_prompt(self, prompt: str) -> None:
+        self._write(RON_PREFIX)
+        try:
+            self.assistant.respond(prompt, on_token=self._stream_token)
+        except ValueError as error:
+            self._line(str(error))
+        except Exception as error:
+            self._line(f"I couldn't update memory safely: {error}")
+        else:
+            self._line("")
+
     def _stream_token(self, token: str) -> None:
+        if not self._response_started:
+            self._clear_live_status()
+            self._write(RON_PREFIX)
+            self._response_started = True
         self._write(token)
+
+    def _on_assistant_progress(self, message: str) -> None:
+        clean = " ".join(message.strip().split())
+        if not clean:
+            return
+        self.post_status(clean)
 
     def _drain_task_notifications(self) -> None:
         if self.assistant.agent is None:
@@ -330,13 +449,13 @@ class TerminalChat:
         if self._last_progress.get(task_id) == marker:
             return
         self._last_progress[task_id] = marker
-        print(f"Ron > {self.assistant.agent.describe_task(snapshot)}", flush=True)
+        self.post_status(self.assistant.agent.describe_task(snapshot))
 
     def _on_reminder(self, reminder: object) -> None:
         if self._live:
             reminder_id = getattr(reminder, "reminder_id", "?")
             message = getattr(reminder, "message", "Reminder finished")
-            print(f"Ron > Reminder {reminder_id}: {message}", flush=True)
+            self._line(f"Ron > Reminder {reminder_id}: {message}")
 
     @staticmethod
     def _parse_task_id(value: str) -> int | None:
@@ -356,4 +475,28 @@ class TerminalChat:
         self._output.flush()
 
     def _line(self, text: str) -> None:
-        self._write(f"{text}\n")
+        self._clear_live_status()
+        self._write(f"{self._format_line(text)}\n")
+
+    def _notice_line(self, message: str) -> None:
+        clean = " ".join(message.strip().split())
+        if clean.startswith("[") and "]" in clean:
+            label, _separator, detail = clean[1:].partition("]")
+            label = " ".join(label.split())[:24]
+            detail = detail.strip()
+            if label and detail:
+                self._line(f"  {label}  ·  {detail}")
+                return
+        self._line(f"  System  ·  {clean}")
+
+    @staticmethod
+    def _format_line(text: str) -> str:
+        leading = ""
+        while text.startswith("\n"):
+            leading += "\n"
+            text = text[1:]
+        if text.startswith("Ron > [WORKING] "):
+            return leading + STATUS_PREFIX + text.removeprefix("Ron > [WORKING] ")
+        if text.startswith("Ron > "):
+            return leading + RON_PREFIX + text.removeprefix("Ron > ")
+        return leading + text

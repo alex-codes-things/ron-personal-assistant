@@ -1,8 +1,12 @@
 import json
+import threading
 from unittest.mock import patch
 
+import pytest
+
+from ron import __version__
 from ron.ai.benchmark import speed_rating
-from ron.ai.ollama_client import OllamaClient, OllamaProtocolError
+from ron.ai.ollama_client import InferenceCancelled, OllamaClient, OllamaProtocolError
 from ron.ai.settings import LocalAISettings
 
 
@@ -87,6 +91,28 @@ def test_stream_chat_reports_ollama_error_items() -> None:
     raise AssertionError("An Ollama error stream item should not be ignored")
 
 
+def test_stream_chat_stops_after_live_cancellation() -> None:
+    cancel = threading.Event()
+    response = FakeResponse(
+        lines=[
+            json_line({"message": {"content": "partial"}, "done": False}),
+            json_line({"message": {"content": "ignored"}, "done": False}),
+        ]
+    )
+
+    def receive(chunk: str) -> None:
+        assert chunk == "partial"
+        cancel.set()
+
+    with patch("ron.ai.ollama_client.urlopen", return_value=response):
+        with pytest.raises(InferenceCancelled):
+            OllamaClient(LocalAISettings()).stream_chat(
+                [{"role": "user", "content": "Hello"}],
+                on_token=receive,
+                cancel_event=cancel,
+            )
+
+
 def test_model_list_supports_both_ollama_name_fields() -> None:
     response = FakeResponse(
         payload=json.dumps(
@@ -96,6 +122,11 @@ def test_model_list_supports_both_ollama_name_fields() -> None:
     with patch("ron.ai.ollama_client.urlopen", return_value=response):
         names = OllamaClient(LocalAISettings()).model_names()
     assert names == {"qwen3.5:4b", "another:latest"}
+
+
+def test_requests_use_current_ron_version() -> None:
+    request = OllamaClient(LocalAISettings())._build_request("GET", "/api/version")
+    assert request.get_header("User-agent") == f"Ron/{__version__}"
 
 
 def test_speed_rating_requires_low_latency_and_generation_speed() -> None:

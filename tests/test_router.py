@@ -1,3 +1,13 @@
+from ron.agent import (
+    AgentPlanner,
+    ToolArgument,
+    ToolArgumentKind,
+    ToolRegistry,
+    ToolResult,
+    ToolRisk,
+    ToolSpec,
+    ToolStatus,
+)
 from ron.ai import (
     InferenceMetrics,
     InferenceResult,
@@ -104,6 +114,13 @@ def test_direct_application_action_is_immediately_routed_to_agent() -> None:
     assert decision.requires_confirmation is False
 
 
+def test_unpause_song_is_immediately_routed_without_model_latency() -> None:
+    decision = PromptRouter(NeverCalledClient()).route("Unpause the song")
+
+    assert decision.destination is RouteDestination.AGENT
+    assert decision.source is RouteSource.DETERMINISTIC
+
+
 def test_destructive_action_is_marked_for_confirmation() -> None:
     decision = PromptRouter(NeverCalledClient()).route("Delete the downloads folder")
     assert decision.destination is RouteDestination.AGENT
@@ -157,6 +174,38 @@ def test_ambiguous_request_uses_local_classifier() -> None:
     assert client.calls == 1
     assert decision.destination is RouteDestination.AGENT
     assert decision.source is RouteSource.LOCAL_MODEL
+
+
+def test_semantic_action_resolver_reuses_its_plan_instead_of_running_two_models() -> None:
+    client = ClassifierClient(
+        '{"tool":"open_application","arguments":{"application":"calculator"}}'
+    )
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="open_application",
+            description="Open the approved calculator.",
+            arguments={
+                "application": ToolArgument(
+                    ToolArgumentKind.ENUM,
+                    choices=("calculator",),
+                )
+            },
+            risk=ToolRisk.REVERSIBLE,
+            handler=lambda arguments: ToolResult(
+                "open_application", ToolStatus.SUCCESS, str(arguments)
+            ),
+        )
+    )
+    planner = AgentPlanner(client, registry)
+    router = PromptRouter(client, action_resolver=planner.can_handle)
+
+    decision = router.route("Reopen the thing I use for sums")
+    plan = planner.plan("Reopen the thing I use for sums")
+
+    assert decision.destination is RouteDestination.AGENT
+    assert plan.tool_name == "open_application"
+    assert client.calls == 1
 
 
 def test_classifier_failure_chooses_non_executing_chat_path() -> None:

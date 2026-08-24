@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -16,13 +17,14 @@ from ron.agent.models import (
     AgentResponse,
     AgentTaskSnapshot,
     AgentTaskStatus,
-    ToolRisk,
     ToolStatus,
 )
 from ron.agent.planner import AgentPlanner
 from ron.agent.registry import ToolRegistry
 from ron.agent.task_manager import AgentTaskManager, TaskListener
 from ron.reminders import Reminder, ReminderManager
+
+type ProgressHandler = Callable[[str], None]
 
 TASK_STATUS_PATTERN = re.compile(
     r"\b(?:status(?: of)?|how is|how's|check)\s+(?:on\s+)?task\s+(\d+)\b",
@@ -44,9 +46,7 @@ REPEAT_PATTERN = re.compile(
 REMINDER_CANCEL_PATTERN = re.compile(
     r"\b(?:cancel|delete|remove)\s+reminder\s+(\d+)\b", re.IGNORECASE
 )
-REMINDER_LIST_PATTERN = re.compile(
-    r"\b(?:show|list|what are)\b.*\breminders\b", re.IGNORECASE
-)
+REMINDER_LIST_PATTERN = re.compile(r"\b(?:show|list|what are)\b.*\breminders\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +115,7 @@ class AgentService:
             clarification = self._pending_clarification
         if confirmation is not None:
             return (
-                CONFIRM_YES.fullmatch(clean) is not None
-                or CONFIRM_NO.fullmatch(clean) is not None
+                CONFIRM_YES.fullmatch(clean) is not None or CONFIRM_NO.fullmatch(clean) is not None
             )
         if clarification is not None:
             return (
@@ -125,7 +124,12 @@ class AgentService:
             )
         return False
 
-    def respond(self, prompt: str) -> AgentResponse:
+    def respond(
+        self,
+        prompt: str,
+        *,
+        on_progress: ProgressHandler | None = None,
+    ) -> AgentResponse:
         self._expire_pending()
         task_control = self._task_control(prompt)
         if task_control is not None:
@@ -133,7 +137,7 @@ class AgentService:
         reminder_control = self._reminder_control(prompt)
         if reminder_control is not None:
             return reminder_control
-        interaction = self._handle_pending(prompt)
+        interaction = self._handle_pending(prompt, on_progress=on_progress)
         if interaction is not None:
             return interaction
         repeated = self._repeat_plans(prompt)
@@ -143,8 +147,9 @@ class AgentService:
                     "I don't have a previous successful action to repeat yet.",
                     self._no_plan("No successful action is available to repeat."),
                 )
-            return self._execute_plans(prompt, repeated)
+            return self._execute_plans(prompt, repeated, on_progress=on_progress)
 
+        self._progress(on_progress, "Planning the safest approved action…")
         task_plan = self.planner.plan_steps(prompt)
         if not task_plan.steps:
             return AgentResponse(
@@ -152,7 +157,7 @@ class AgentService:
                 "action to an approved tool. Nothing was changed.",
                 self._no_plan(task_plan.reason),
             )
-        return self._execute_plans(prompt, task_plan.steps)
+        return self._execute_plans(prompt, task_plan.steps, on_progress=on_progress)
 
     def _execute_plans(
         self,
@@ -160,7 +165,9 @@ class AgentService:
         plans: tuple[AgentPlan, ...],
         *,
         confirmed: bool = False,
+        on_progress: ProgressHandler | None = None,
     ) -> AgentResponse:
+        self._progress(on_progress, "Checking the complete action before it runs…")
         for index, plan in enumerate(plans, start=1):
             assert plan.tool_name is not None
             preflight = self.registry.preflight(
@@ -180,21 +187,15 @@ class AgentService:
                 )
                 return AgentResponse(text, plans[0], preflight, plans=plans)
             if preflight.status is not ToolStatus.READY:
-                text = (
-                    f"Preflight stopped at step {index}: {preflight.message} "
-                    "No step was run."
-                )
+                text = f"Preflight stopped at step {index}: {preflight.message} No step was run."
                 return AgentResponse(text, plans[0], preflight, plans=plans)
 
         first_spec = self.registry.spec(plans[0].tool_name or "")
-        should_queue = len(plans) > 1 or (
-            first_spec is not None and first_spec.risk is ToolRisk.EXTERNAL
-        )
+        should_queue = len(plans) > 1 or (first_spec is not None and first_spec.run_in_background)
         if should_queue:
+            self._progress(on_progress, "Queuing the approved task…")
             try:
-                snapshot = self.tasks.submit(
-                    prompt.strip(), plans, confirmed=confirmed
-                )
+                snapshot = self.tasks.submit(prompt.strip(), plans, confirmed=confirmed)
             except (RuntimeError, ValueError) as error:
                 return AgentResponse(
                     f"I couldn't queue that task safely: {error}",
@@ -203,6 +204,10 @@ class AgentService:
                 )
             with self._lock:
                 self._submitted_plans[snapshot.task_id] = plans
+            self._progress(
+                on_progress,
+                f"Task {snapshot.task_id} is queued; its steps will update here.",
+            )
             text = (
                 f"Task {snapshot.task_id} passed full preflight and is queued with "
                 f"{snapshot.total_steps} step(s). You can keep chatting, check its "
@@ -212,6 +217,7 @@ class AgentService:
 
         plan = plans[0]
         assert plan.tool_name is not None
+        self._progress(on_progress, f"Running: {self._tool_stage(plan.tool_name)}…")
         result = self.registry.execute(plan.tool_name, plan.arguments, confirmed=confirmed)
         self._logger.debug(
             "Agent tool finished: name=%s status=%s duration=%.3fs",
@@ -220,8 +226,30 @@ class AgentService:
             result.duration_seconds,
         )
         if result.status is ToolStatus.SUCCESS:
+            evidence_keys = {
+                "level",
+                "muted",
+                "battery_percent",
+                "current_value",
+                "state_after",
+                "reminder_id",
+            }
+            verified = result.data.get("verified") is True or (
+                result.data.get("state_aware") is True
+                or bool(evidence_keys.intersection(result.data))
+            )
+            prefix = "Verified result" if verified else "Completed request"
+            self._progress(on_progress, f"{prefix}: {result.message}")
             with self._lock:
                 self._last_successful_plans = plans
+            recorder = getattr(self.planner, "record_success", None)
+            if callable(recorder):
+                recorder(plans, prompt=prompt)
+        else:
+            self._progress(
+                on_progress,
+                f"Stopped safely: {result.message}",
+            )
         return AgentResponse(result.message, plan, result, plans=plans)
 
     def task_snapshot(self, task_id: int) -> AgentTaskSnapshot | None:
@@ -246,11 +274,7 @@ class AgentService:
             for snapshot in task_states
             if snapshot.status in {AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING}
         )
-        waiting = sum(
-            1
-            for snapshot in task_states
-            if snapshot.status is AgentTaskStatus.WAITING
-        )
+        waiting = sum(1 for snapshot in task_states if snapshot.status is AgentTaskStatus.WAITING)
         unavailable_text = ", ".join(unavailable) if unavailable else "none"
         return (
             f"Agent tools: {ready}/{len(report)} ready; unavailable: {unavailable_text}; "
@@ -277,7 +301,12 @@ class AgentService:
     def drain_reminders(self) -> tuple[Reminder, ...]:
         return self.reminders.drain_notifications() if self.reminders is not None else ()
 
-    def _handle_pending(self, prompt: str) -> AgentResponse | None:
+    def _handle_pending(
+        self,
+        prompt: str,
+        *,
+        on_progress: ProgressHandler | None = None,
+    ) -> AgentResponse | None:
         clean = prompt.strip()
         with self._lock:
             confirmation = self._pending_confirmation
@@ -296,6 +325,7 @@ class AgentService:
                 confirmation.prompt,
                 confirmation.plans,
                 confirmed=True,
+                on_progress=on_progress,
             )
         if clarification is not None and CONFIRM_NO.fullmatch(clean):
             with self._lock:
@@ -323,6 +353,7 @@ class AgentService:
                 response = self._execute_plans(
                     f"Play Spotify choice {choice} for {clarification.query}",
                     (plan,),
+                    on_progress=on_progress,
                 )
                 replacement = (
                     f" Continued as task {response.task.task_id}."
@@ -394,6 +425,9 @@ class AgentService:
             plans = self._submitted_plans.pop(snapshot.task_id, ())
             if snapshot.status is AgentTaskStatus.COMPLETED and plans:
                 self._last_successful_plans = plans
+                recorder = getattr(self.planner, "record_success", None)
+                if callable(recorder):
+                    recorder(plans, prompt=snapshot.prompt)
             if snapshot.status is AgentTaskStatus.WAITING:
                 interaction = snapshot.interaction
                 candidates = interaction.get("candidates")
@@ -444,9 +478,7 @@ class AgentService:
                 self._pending_clarification = None
 
     @staticmethod
-    def _clarification_choice(
-        prompt: str, clarification: _PendingClarification
-    ) -> int | None:
+    def _clarification_choice(prompt: str, clarification: _PendingClarification) -> int | None:
         words = {"first": 1, "one": 1, "second": 2, "two": 2, "third": 3, "three": 3}
         clean = prompt.casefold().strip(" .!?")
         choice = int(clean) if clean.isdecimal() else words.get(clean)
@@ -470,11 +502,30 @@ class AgentService:
         return f"{plan.tool_name} with {plan.arguments}"
 
     @staticmethod
+    def _progress(handler: ProgressHandler | None, message: str) -> None:
+        if handler is not None:
+            handler(message)
+
+    @staticmethod
+    def _tool_stage(tool_name: str) -> str:
+        labels = {
+            "control_media": "controlling the current media",
+            "spotify_control_playback": "controlling Spotify playback",
+            "spotify_play_track": "finding and playing the Spotify track",
+            "open_application": "opening the application",
+            "control_volume": "adjusting the volume",
+            "control_brightness": "adjusting the screen brightness",
+            "search_approved_folder": "searching the approved folder",
+            "open_folder": "opening the folder",
+            "create_reminder": "saving the reminder",
+        }
+        return labels.get(tool_name, tool_name.replace("_", " "))
+
+    @staticmethod
     def describe_task(snapshot: AgentTaskSnapshot) -> str:
         progress = f"{snapshot.completed_steps}/{snapshot.total_steps} steps"
         return (
-            f"Task {snapshot.task_id} is {snapshot.status.value} ({progress}). "
-            f"{snapshot.message}"
+            f"Task {snapshot.task_id} is {snapshot.status.value} ({progress}). {snapshot.message}"
         )
 
     @classmethod

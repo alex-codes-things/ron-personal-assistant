@@ -3,31 +3,31 @@ plugins {
 }
 
 android {
-    namespace "com.alexcodesthings.ronface"
-    compileSdk 35
+    namespace = "com.alexcodesthings.ronface"
+    compileSdk = 35
 
     defaultConfig {
-        applicationId "com.alexcodesthings.ronface"
-        minSdk 22
-        targetSdk 35
-        versionCode 18
-        versionName "0.1.17"
+        applicationId = "com.alexcodesthings.ronface"
+        minSdk = 22
+        targetSdk = 35
+        versionCode = 18
+        versionName = "0.1.17"
     }
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
+            minifyEnabled = true
+            shrinkResources = true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     buildFeatures {
-        buildConfig true
+        buildConfig = true
     }
 }

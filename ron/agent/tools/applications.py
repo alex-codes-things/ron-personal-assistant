@@ -33,7 +33,7 @@ APPLICATIONS = {
     "browser": ApplicationTarget("your default browser", "https://www.google.com", True),
 }
 
-Launcher = Callable[[ApplicationTarget], None]
+type Launcher = Callable[[ApplicationTarget], None]
 
 
 def _windows_launcher(application: ApplicationTarget) -> None:
@@ -86,7 +86,7 @@ def build_application_tool(launcher: Launcher = _windows_launcher) -> ToolSpec:
                 ToolArgumentKind.ENUM, choices=tuple(APPLICATIONS)
             )
         },
-        risk=ToolRisk.EXTERNAL,
+        risk=ToolRisk.REVERSIBLE,
         handler=open_application,
         timeout_seconds=5.0,
         availability=availability,

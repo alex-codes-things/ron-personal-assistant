@@ -6,8 +6,8 @@ from tempfile import TemporaryDirectory
 
 from ron.agent import (
     AgentPlan,
-    AgentPlanSource,
     AgentPlanner,
+    AgentPlanSource,
     AgentService,
     AgentTaskManager,
     AgentTaskSnapshot,
@@ -25,8 +25,8 @@ from ron.agent.models import AgentTaskPlan
 from ron.agent.tools.spotify import build_spotify_tool
 from ron.ai import InferencePriority, InferenceScheduler
 from ron.integrations.spotify import SpotifyTrack
-from ron.terminal import TerminalChat
 from ron.reminders import ReminderManager
+from ron.terminal import TerminalChat
 
 
 class NeverCalledClient:

@@ -1,4 +1,4 @@
-"""Optional, fully local wake-word and speech-input subsystem."""
+"""Optional local-wake, cloud-first conversational voice subsystem."""
 
 from ron.voice.models import (
     TranscriptionResult,
@@ -8,12 +8,15 @@ from ron.voice.models import (
 )
 from ron.voice.service import VoiceService
 from ron.voice.settings import VoiceSettings
+from ron.voice.speech import SpeechOutputService, SpeechTextFormatter
 
 __all__ = [
     "TranscriptionResult",
     "VoiceInput",
     "VoiceReply",
     "VoiceService",
+    "SpeechOutputService",
+    "SpeechTextFormatter",
     "VoiceSettings",
     "VoiceState",
 ]

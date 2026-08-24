@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from threading import Event
 from time import monotonic
 
 
@@ -16,6 +17,8 @@ class VoiceState(StrEnum):
     LISTENING = "listening"
     TRANSCRIBING = "transcribing"
     PROCESSING = "processing"
+    SPEAKING = "speaking"
+    READYING = "readying microphone"
     RETRYING = "retrying"
     OFFLINE = "offline"
     STOPPED = "stopped"
@@ -29,6 +32,8 @@ class TranscriptionResult:
     confidence: float
     duration_seconds: float
     no_speech_probability: float = 0.0
+    decode_mode: str = "fast"
+    decode_passes: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +44,8 @@ class VoiceInput:
     text: str
     confidence: float
     wake_phrase: str | None
+    correction_notes: tuple[str, ...] = ()
+    transcription_seconds: float = 0.0
     received_at: float = field(default_factory=monotonic)
 
 
@@ -48,6 +55,9 @@ class VoiceReply:
 
     text: str
     continue_listening: bool = False
+    speech_played: bool = False
+    allow_followup: bool = True
+    speech_completion: Event | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -45,7 +45,7 @@ class LanDiscovery:
             while monotonic() < deadline:
                 try:
                     payload, source = sock.recvfrom(8192)
-                except (TimeoutError, socket.timeout):
+                except TimeoutError:
                     continue
                 except OSError:
                     break

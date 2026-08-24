@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from time import perf_counter
@@ -10,22 +11,24 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ron import __version__
+from ron.ai.errors import AIConnectionError, AIError, AIProtocolError, InferenceCancelled
 from ron.ai.settings import LocalAISettings
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_STREAM_LINE_BYTES = 1024 * 1024
-TokenHandler = Callable[[str], None]
+type TokenHandler = Callable[[str], None]
 
 
-class OllamaError(RuntimeError):
+class OllamaError(AIError):
     """Base error for failures talking to local Ollama."""
 
 
-class OllamaConnectionError(OllamaError):
+class OllamaConnectionError(OllamaError, AIConnectionError):
     """Raised when the local Ollama service cannot be reached."""
 
 
-class OllamaProtocolError(OllamaError):
+class OllamaProtocolError(OllamaError, AIProtocolError):
     """Raised when Ollama returns malformed or unexpected data."""
 
 
@@ -70,6 +73,12 @@ class OllamaClient:
 
     def __init__(self, settings: LocalAISettings | None = None) -> None:
         self.settings = settings or LocalAISettings.from_environment()
+
+    is_local = True
+
+    @property
+    def provider_label(self) -> str:
+        return f"Ollama local ({self.settings.model})"
 
     def version(self) -> str:
         """Return the running Ollama version."""
@@ -123,6 +132,7 @@ class OllamaClient:
         think: bool = False,
         max_output_tokens: int = 128,
         temperature: float = 0.2,
+        cancel_event: threading.Event | None = None,
     ) -> InferenceResult:
         """Stream one chat request and report true time to first visible token."""
         message_list = self._validate_messages(messages)
@@ -130,6 +140,8 @@ class OllamaClient:
             raise ValueError("max_output_tokens must be between 1 and 8192")
         if not 0.0 <= temperature <= 2.0:
             raise ValueError("temperature must be between 0 and 2")
+        if cancel_event is not None and cancel_event.is_set():
+            raise InferenceCancelled("The inference was cancelled")
 
         body = {
             "model": self.settings.model,
@@ -153,6 +165,8 @@ class OllamaClient:
         try:
             with urlopen(request, timeout=self.settings.request_timeout_seconds) as response:
                 for raw_line in response:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise InferenceCancelled("The inference was cancelled")
                     bytes_received += len(raw_line)
                     if bytes_received > MAX_RESPONSE_BYTES:
                         raise OllamaProtocolError("Ollama's streamed response was too large")
@@ -185,6 +199,8 @@ class OllamaClient:
             ) from error
 
         elapsed_seconds = perf_counter() - started
+        if cancel_event is not None and cancel_event.is_set():
+            raise InferenceCancelled("The inference was cancelled")
         if final_payload is None:
             raise OllamaProtocolError("Ollama ended the stream without a completion record")
 
@@ -255,7 +271,7 @@ class OllamaClient:
         self, method: str, path: str, body: Mapping[str, Any] | None = None
     ) -> Request:
         data = None
-        headers = {"Accept": "application/json", "User-Agent": "Ron/0.1"}
+        headers = {"Accept": "application/json", "User-Agent": f"Ron/{__version__}"}
         if body is not None:
             data = json.dumps(body, allow_nan=False, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"

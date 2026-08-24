@@ -13,13 +13,13 @@ fit this design unless the design is deliberately revised first.
 3. Chat remains the user-facing personality. The agent is an internal worker;
    it returns progress and results through chat instead of becoming a second
    competing personality.
-4. Offline operation is mandatory. Cloud models may improve difficult work
-   later, but loss of internet must never make ordinary local use impossible.
+4. Local commands, safety and voice remain available without cloud inference.
+   Ollama is an optional cold fallback for offline conversation.
 5. Fast interaction is a feature, not an afterthought. Ron streams visible text,
-   keeps the primary model warm, and gives live conversation priority over
+   streams the selected model and gives live conversation priority over
    background agent planning.
 6. The tablet face is an optional output adapter. Disconnecting or failing that
-   adapter must never stop chat, tools, tasks, reminders, or local inference.
+   adapter must never stop chat, tools, tasks, reminders, or AI inference.
 
 ## System shape
 
@@ -30,10 +30,10 @@ flowchart TD
     Router --> Agent["Agent task manager"]
     Chat --> Agent
     Agent --> Tools["Validated tool registry"]
-    Chat --> Models["Local-first model adapter"]
+    Chat --> Models["Provider-neutral model adapter"]
     Agent --> Models
-    Models --> Local["Warm local Ollama model"]
-    Models -. optional fallback .-> Cloud["Cloud model"]
+    Models --> Cloud["Streaming Groq GPT-OSS model"]
+    Models -. optional cold fallback .-> Local["Local Ollama model"]
     Chat --> Output["Terminal now; speech and face later"]
     Agent --> Chat
 ```
@@ -58,26 +58,23 @@ and whether confirmation is required. It never executes a tool itself.
 | Ready | Program starts or chat ends | Short recent context | Yes |
 | Continuous chat | `Start a chat` | Longer conversation context | Yes, through chat |
 | Working | An agent task is active | Task state plus chat summary | Yes; chat stays responsive |
-| Offline degraded | Local dependency fails | Last safe local state | No unsafe guessing |
+| Offline degraded | Selected provider fails | Last safe local state | No unsafe guessing |
 
 An agent task does not lock the interface. The user can ask questions, request
 status, cancel the task, or submit another prompt while work continues.
 
 ## Model policy
 
-- Runtime: Ollama on `127.0.0.1` only.
-- Initial model: `qwen3.5:4b`, selected for a practical first benchmark rather
-  than assumed to be the permanent winner.
-- Initial context: 8,192 tokens to control latency and memory use.
-- Keep-alive: `-1` while Ron is active so follow-up prompts do not reload the
-  model.
+- Runtime: `auto`, `groq`, `openai`, or loopback-only `ollama` selected at startup.
+- Recommended cloud model: Groq `openai/gpt-oss-120b` with low reasoning effort for voice work.
+- Local fallback: `qwen3.5:4b`, never preloaded in cloud-first operation.
+- Local context: 8,192 tokens; fallback keep-alive defaults to two minutes.
 - Thinking: disabled for simple conversation and routing; enabled selectively
   only when harder planning benefits from it.
 - Streaming: user-visible output begins as soon as the first content arrives.
-- Optional upgrade: benchmark a larger local agent model only after the 4B
-  baseline is measured on the actual computer.
-- Cloud: opt-in adapter added later with a short timeout and automatic local
-  fallback. Sensitive prompts stay local by policy.
+- Groq requests use the official HTTPS Chat Completions endpoint, exclude returned reasoning,
+  bound normal prompts for the free tier, and keep API keys out of diagnostics and repr output.
+- Provider failure never grants tools or relaxes confirmation checks.
 
 ## Agent safety
 
@@ -125,8 +122,8 @@ explicit confirmation.
 
 ## Inference scheduling
 
-One scheduler owns local-model requests so two systems do not overload the
-computer independently. Priority is:
+One scheduler serialises Ron's routing, planning and conversation requests. In
+local mode it also protects the CPU from simultaneous model work. Priority is:
 
 1. current user conversation;
 2. routing clarification and agent progress summaries;
@@ -134,8 +131,8 @@ computer independently. Priority is:
 4. future memory indexing and other maintenance.
 
 Long agent reasoning is split into bounded steps so it can yield between them.
-The implemented scheduler serialises access to the local Ollama model and lets
-waiting conversation run before waiting routing, planning, or maintenance.
+Cloud mode deliberately keeps Whisper and Kokoro outside this scheduler, allowing
+local audio processing to overlap network generation without CPU contention from Ollama.
 
 ## Delivery milestones
 
@@ -147,8 +144,9 @@ waiting conversation run before waiting routing, planning, or maintenance.
 | 3 | Safe agent loop and initial application tools | Implemented |
 | 4 | Multi-step tasks, preflight, progress, cancellation and Spotify adapter | Implemented |
 | 4.1 | Deadlines, rollback, recovery, reminders, tools and diagnostics | Implemented |
-| 5 | Optional cloud adapter with local fallback | Planned |
-| Later | Memory, external drive, voice, wake word, recognition, monitoring | Planned |
+| 5 | Hybrid cloud adapters with optional cold local fallback | Implemented in v0.11 |
+| 5.1 | Free Groq GPT-OSS 120B adapter and provider priority | Implemented in v0.11.1 |
+| Later | Optional Realtime speech-to-speech conversation mode | Planned |
 
 Memory is intentionally postponed until chat, routing, and tools have stable
 event schemas. Facial recognition, if added, requires explicit enrolment,

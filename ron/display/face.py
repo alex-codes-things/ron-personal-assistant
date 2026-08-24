@@ -11,8 +11,7 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from ron.core import Coordinator
-from ron.core import EventType, FaceExpression, RonEvent
+from ron.core import Coordinator, EventType, FaceExpression, RonEvent
 from ron.display.tablet_client import (
     ConnectionStatus,
     FaceConnectionUpdate,
@@ -20,21 +19,22 @@ from ron.display.tablet_client import (
     TabletFaceClient,
 )
 
-
 if TYPE_CHECKING:
     from ron.network import NetworkService
 
-NoticeListener = Callable[[str], None]
+type NoticeListener = Callable[[str], None]
 
 
 def _reminder_interval_from_environment() -> float:
-    raw = os.getenv("RON_FACE_REMINDER_MINUTES", "20").strip()
+    raw = os.getenv("RON_FACE_REMINDER_MINUTES", "0").strip()
     try:
         minutes = float(raw)
     except ValueError:
-        minutes = 20.0
+        minutes = 0.0
     if not isfinite(minutes):
-        minutes = 20.0
+        minutes = 0.0
+    if minutes <= 0.0:
+        return float("inf")
     return max(5.0, min(240.0, minutes)) * 60.0
 
 
@@ -50,7 +50,6 @@ class TabletFaceDisplay:
         network_service: NetworkService | None = None,
         reminder_interval_seconds: float | None = None,
     ) -> None:
-        self._coordinator = coordinator
         self._logger = logging.getLogger(__name__)
         self._network_service = network_service
         self.client = client or TabletFaceClient(
@@ -73,6 +72,8 @@ class TabletFaceDisplay:
         self._last_notice_kind = ""
         self._reminder_interval = (
             max(1.0, reminder_interval_seconds)
+            if reminder_interval_seconds is not None and reminder_interval_seconds > 0.0
+            else float("inf")
             if reminder_interval_seconds is not None
             else _reminder_interval_from_environment()
         )
@@ -149,8 +150,10 @@ class TabletFaceDisplay:
             due = (
                 force
                 or not self._offline_announced
-                or notice_kind != self._last_notice_kind
-                or now - self._last_offline_notice >= self._reminder_interval
+                or (
+                    isfinite(self._reminder_interval)
+                    and now - self._last_offline_notice >= self._reminder_interval
+                )
             )
             if not due:
                 return

@@ -44,7 +44,8 @@ def main() -> int:
     report_at = time.monotonic() + 3.0
     print(
         f"Wake-only dry test on {microphone.device_label}. Say 'Hey Ron'. "
-        f"Threshold: {settings.wake_threshold:.2f}. "
+        f"Sensitivity: {settings.wake_sensitivity}; "
+        f"effective threshold: {wake.effective_threshold:.2f}. "
         "No transcript, router, AI model or tool is connected."
     )
     try:
@@ -75,7 +76,8 @@ def main() -> int:
     if detections == 0:
         print(
             "No wake word was detected. First confirm the level changes while speaking. "
-            "Then retry this safe test with --threshold 0.25."
+            "With high sensitivity already active, retry this safe test with --threshold 0.15 "
+            "only if the room is reasonably quiet."
         )
     return 0
 

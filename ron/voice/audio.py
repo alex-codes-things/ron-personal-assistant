@@ -102,6 +102,62 @@ def root_mean_square(samples: Sequence[float]) -> float:
     return math.sqrt(sum(float(value) ** 2 for value in samples) / len(samples))
 
 
+class StreamingLinearResampler:
+    """Continuous fallback resampling without introducing a seam per callback.
+
+    PortAudio normally opens the microphone at 16 kHz. Some Windows drivers only
+    expose 44.1 or 48 kHz, though, and the old code resampled every callback as an
+    unrelated clip. That duplicated or dropped boundary samples and could make
+    consonants less distinct. This small stateful fallback preserves one global
+    sample timeline while remaining dependency-free.
+    """
+
+    def __init__(self, source_rate: int, target_rate: int) -> None:
+        if source_rate <= 0 or target_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        self.source_rate = int(source_rate)
+        self.target_rate = int(target_rate)
+        self._step = self.source_rate / self.target_rate
+        self._processed = 0
+        self._next_position = 0.0
+        self._previous: float | None = None
+
+    def process(self, samples: Sequence[float]) -> array[float]:
+        source = array("f", samples)
+        if not source:
+            return array("f")
+        if self.source_rate == self.target_rate:
+            self._processed += len(source)
+            self._previous = float(source[-1])
+            return source
+
+        start = self._processed
+        end = start + len(source) - 1
+        output = array("f")
+        epsilon = 1e-9
+
+        while self._next_position <= end + epsilon:
+            left_index = math.floor(self._next_position)
+            right_index = math.ceil(self._next_position)
+            if right_index > end:
+                break
+
+            if left_index < start:
+                if self._previous is None or left_index != start - 1:
+                    break
+                left = self._previous
+            else:
+                left = float(source[left_index - start])
+            right = float(source[right_index - start])
+            fraction = self._next_position - left_index
+            output.append(left + (right - left) * fraction)
+            self._next_position += self._step
+
+        self._processed += len(source)
+        self._previous = float(source[-1])
+        return output
+
+
 class MicrophoneStream:
     """Capture frames into a bounded queue and recover cleanly after stop."""
 
@@ -111,17 +167,20 @@ class MicrophoneStream:
         target_sample_rate: int = 16_000,
         device: str | int | None = None,
         queue_frames: int = 64,
+        block_ms: int = 32,
     ) -> None:
         self.target_sample_rate = target_sample_rate
         self.device = device
+        self.block_ms = max(10, min(100, int(block_ms)))
         self._queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=queue_frames)
         self._stream: Any = None
-        self._sounddevice: Any = None
         self._native_sample_rate = target_sample_rate
         self._running = False
         self._lock = threading.RLock()
         self._overflow_count = 0
         self._device_label = "not selected"
+        self._capture_muted = False
+        self._resampler: StreamingLinearResampler | None = None
 
     @property
     def overflow_count(self) -> int:
@@ -166,13 +225,11 @@ class MicrophoneStream:
             if self._running:
                 return
             try:
-                import numpy as np  # noqa: F401
                 import sounddevice as sd
             except ImportError as error:
                 raise VoiceDependencyError(
                     "Voice dependencies are missing. Run scripts/setup_voice.ps1."
                 ) from error
-            self._sounddevice = sd
             selected = self._resolve_device(sd)
             details = sd.query_devices(selected, "input")
             self._device_label = str(details.get("name", selected or "default microphone"))
@@ -193,12 +250,13 @@ class MicrophoneStream:
                 self._native_sample_rate = native_rate
 
             try:
+                blocksize = max(64, round(self._native_sample_rate * self.block_ms / 1000))
                 self._stream = sd.InputStream(
                     device=selected,
                     channels=1,
                     dtype="float32",
                     samplerate=self._native_sample_rate,
-                    blocksize=0,
+                    blocksize=blocksize,
                     latency="low",
                     callback=self._callback,
                 )
@@ -210,7 +268,7 @@ class MicrophoneStream:
                         channels=1,
                         dtype="float32",
                         samplerate=self._native_sample_rate,
-                        blocksize=0,
+                        blocksize=blocksize,
                         latency="high",
                         callback=self._callback,
                     )
@@ -220,6 +278,13 @@ class MicrophoneStream:
                     raise MicrophoneError(
                         f"Could not open {self._device_label}: {error}"
                     ) from first_error
+            self._resampler = (
+                None
+                if self._native_sample_rate == self.target_sample_rate
+                else StreamingLinearResampler(
+                    self._native_sample_rate, self.target_sample_rate
+                )
+            )
             self._running = True
 
     def stop(self) -> None:
@@ -227,6 +292,7 @@ class MicrophoneStream:
             self._running = False
             stream = self._stream
             self._stream = None
+            self._resampler = None
         if stream is not None:
             try:
                 stream.stop()
@@ -242,6 +308,22 @@ class MicrophoneStream:
             except queue.Empty:
                 break
 
+    def set_capture_muted(self, muted: bool) -> None:
+        """Drop callback frames while Ron's own speakers are active."""
+        self._capture_muted = bool(muted)
+        if muted:
+            self.discard_pending()
+
+    def discard_pending(self) -> int:
+        """Discard audio captured while Ron himself was speaking."""
+        discarded = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                discarded += 1
+            except queue.Empty:
+                return discarded
+
     def read(self, timeout: float = 0.25) -> array[float] | None:
         try:
             frame = self._queue.get(timeout=timeout)
@@ -256,7 +338,17 @@ class MicrophoneStream:
         except (TypeError, ValueError) as error:
             raise MicrophoneError("The microphone returned malformed audio") from error
         if frame.sample_rate != self.target_sample_rate:
-            samples = linear_resample(samples, frame.sample_rate, self.target_sample_rate)
+            resampler = self._resampler
+            if (
+                resampler is None
+                or resampler.source_rate != frame.sample_rate
+                or resampler.target_rate != self.target_sample_rate
+            ):
+                resampler = StreamingLinearResampler(
+                    frame.sample_rate, self.target_sample_rate
+                )
+                self._resampler = resampler
+            samples = resampler.process(samples)
         return samples
 
     def _callback(
@@ -267,10 +359,9 @@ class MicrophoneStream:
         status: object,
     ) -> None:
         del frames, time_info
-        if not self._running and self._stream is not None:
-            # PortAudio can invoke one callback while start() is completing.
-            pass
         try:
+            if self._capture_muted:
+                return
             samples = indata[:, 0].copy()  # type: ignore[index]
             overflowed = bool(status)
             frame = AudioFrame(samples, self._native_sample_rate, overflowed)

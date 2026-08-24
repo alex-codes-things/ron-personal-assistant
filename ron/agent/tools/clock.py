@@ -8,7 +8,7 @@ from datetime import datetime
 from ron.agent.models import ToolResult, ToolRisk, ToolStatus
 from ron.agent.registry import ToolSpec
 
-Clock = Callable[[], datetime]
+type Clock = Callable[[], datetime]
 
 
 def _local_now() -> datetime:

@@ -14,8 +14,8 @@ from time import monotonic
 
 SUPPORTED_QUICK_ACTIONS = frozenset({"open_spotify", "open_youtube"})
 
-ActionLauncher = Callable[[], None]
-Clock = Callable[[], float]
+type ActionLauncher = Callable[[], None]
+type Clock = Callable[[], float]
 
 
 @dataclass(frozen=True, slots=True)

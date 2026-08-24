@@ -69,3 +69,10 @@ class SileroEndpointDetector:
             if segment:
                 completed.append(segment)
         return tuple(completed)
+
+    def reset(self) -> None:
+        """Discard speaker-tail state before opening a no-wake follow-up window."""
+        self._pending = array("f")
+        resetter = getattr(self._vad, "reset", None)
+        if callable(resetter):
+            resetter()

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections import OrderedDict, deque
+from dataclasses import dataclass
+from time import monotonic
 
 from ron.agent.models import AgentPlan, AgentPlanSource, AgentTaskPlan
 from ron.agent.registry import ToolRegistry
-from ron.ai import OllamaClient, OllamaError
+from ron.ai import AIClient, AIError
 
 TIME_PATTERN = re.compile(
     r"\b(?:what(?:'?s| is) (?:the )?(?:current )?time|what time is it|"
@@ -38,12 +42,13 @@ APP_ALIASES = {
 ACTION_SPLIT_PATTERN = re.compile(
     r"(?:\s*,\s*(?:then\s+)?|\s*;\s*|\s+(?:and\s+then|then|and)\s+)"
     r"(?=(?:please\s+)?(?:open|launch|start|set|put|change|turn|adjust|mute|"
-    r"unmute|play|pause|resume|next|skip|previous|what|tell|get|check|create|"
+    r"unmute|play|pause|resume|unpause|continue|next|skip|previous|what|tell|get|check|create|"
     r"search|find|remind)\b)",
     re.IGNORECASE,
 )
 NAMED_TRACK_PATTERN = re.compile(r"^(?:please\s+)?play\s+(.+?)\s*[.!?]*$", re.IGNORECASE)
 MAX_PLAN_STEPS = 4
+MAX_CONTEXT_ACTIONS = 12
 NUMBER_WORDS = {
     "zero": 0,
     "one": 1,
@@ -77,17 +82,91 @@ NUMBER_WORDS = {
 }
 
 PLANNER_INSTRUCTION = """Choose at most one approved tool for the user's request.
+Interpret the user's ordinary meaning instead of requiring an exact command phrase. For
+example, unpause, carry on or continue the current song means resume playback. Resolve only
+to the approved tools and their exact arguments.
+Use the recent verified action context only for natural references such as it, that,
+the same one, or do that again. Prefer tools marked available and never select a tool
+whose availability is false.
 Return one JSON object only: {"tool":"tool_name","arguments":{...}}.
 If no listed tool can fully and safely perform the request, return
 {"tool":null,"arguments":{}}. Never invent a tool or argument. Approved tools:"""
 
 
+@dataclass(frozen=True, slots=True)
+class _RecentAction:
+    plans: tuple[AgentPlan, ...]
+    prompt: str
+    recorded_at: float
+
+
 class AgentPlanner:
     """Produce plans only; this class has no execution authority."""
 
-    def __init__(self, client: OllamaClient, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        client: AIClient,
+        registry: ToolRegistry,
+        *,
+        context_ttl_seconds: float = 15 * 60,
+    ) -> None:
+        if not 60 <= context_ttl_seconds <= 24 * 60 * 60:
+            raise ValueError("Agent context lifetime must be between 1 minute and 24 hours")
         self.client = client
         self.registry = registry
+        self.context_ttl_seconds = context_ttl_seconds
+        self._prepared: OrderedDict[str, AgentTaskPlan] = OrderedDict()
+        self._prepared_lock = threading.RLock()
+        self._prepared_limit = 16
+        self._context_version = 0
+        self._last_successful_plans: tuple[AgentPlan, ...] = ()
+        self._recent_successes: deque[_RecentAction] = deque(maxlen=MAX_CONTEXT_ACTIONS)
+
+    def record_success(self, plans: tuple[AgentPlan, ...], *, prompt: str = "") -> None:
+        """Remember a tiny, safe action context for conversational references."""
+        if not plans:
+            return
+        with self._prepared_lock:
+            self._last_successful_plans = plans[-MAX_PLAN_STEPS:]
+            self._purge_expired_context_locked()
+            self._recent_successes.append(
+                _RecentAction(
+                    plans[-MAX_PLAN_STEPS:],
+                    " ".join(prompt.strip().split())[:240],
+                    monotonic(),
+                )
+            )
+            self._context_version += 1
+            self._prepared.clear()
+
+    def context_summary(self) -> dict[str, object]:
+        with self._prepared_lock:
+            self._purge_expired_context_locked()
+            recent = tuple(self._recent_successes)
+            version = self._context_version
+        return {
+            "version": version,
+            "recent_actions": [
+                {
+                    "tool": plan.tool_name,
+                    "arguments": dict(plan.arguments),
+                    "age_seconds": round(max(0.0, monotonic() - item.recorded_at), 1),
+                }
+                for item in recent
+                for plan in item.plans
+                if plan.tool_name is not None
+            ],
+        }
+
+    def _purge_expired_context_locked(self) -> None:
+        cutoff = monotonic() - self.context_ttl_seconds
+        while self._recent_successes and self._recent_successes[0].recorded_at < cutoff:
+            self._recent_successes.popleft()
+
+    def _cache_key(self, prompt: str) -> str:
+        with self._prepared_lock:
+            version = self._context_version
+        return f"{version}:{prompt.casefold()}"
 
     def plan(self, prompt: str) -> AgentPlan:
         """Compatibility entry point for a single step only."""
@@ -103,6 +182,31 @@ class AgentPlanner:
 
     def plan_steps(self, prompt: str) -> AgentTaskPlan:
         clean_prompt = prompt.strip().replace("’", "'").replace("`", "'")
+        key = self._cache_key(clean_prompt)
+        with self._prepared_lock:
+            prepared = self._prepared.pop(key, None)
+        if prepared is not None:
+            return prepared
+        return self._build_plan_steps(clean_prompt)
+
+    def can_handle(self, prompt: str) -> bool:
+        """Resolve one action-shaped prompt once and reuse the plan after routing."""
+        clean_prompt = prompt.strip().replace("’", "'").replace("`", "'")
+        if not clean_prompt:
+            return False
+        key = self._cache_key(clean_prompt)
+        with self._prepared_lock:
+            prepared = self._prepared.get(key)
+        if prepared is None:
+            prepared = self._build_plan_steps(clean_prompt)
+            with self._prepared_lock:
+                self._prepared[key] = prepared
+                self._prepared.move_to_end(key)
+                while len(self._prepared) > self._prepared_limit:
+                    self._prepared.popitem(last=False)
+        return bool(prepared.steps)
+
+    def _build_plan_steps(self, clean_prompt: str) -> AgentTaskPlan:
         segments = tuple(
             segment.strip(" ,")
             for segment in ACTION_SPLIT_PATTERN.split(clean_prompt)
@@ -138,6 +242,9 @@ class AgentPlanner:
         )
 
     def _deterministic_plan(self, prompt: str) -> AgentPlan | None:
+        contextual = self._contextual_plan(prompt)
+        if contextual is not None:
+            return contextual
         if TIME_PATTERN.search(prompt) and DATE_PATTERN.search(prompt):
             return self._no_plan("Time and date must be requested as explicit steps.")
         if TIME_PATTERN.search(prompt):
@@ -180,13 +287,9 @@ class AgentPlanner:
                 "Matched a small volume increase.",
             )
         if re.search(r"\bunmute\b", prompt, re.IGNORECASE):
-            return self._plan(
-                "control_volume", {"action": "unmute"}, "Matched an unmute request."
-            )
+            return self._plan("control_volume", {"action": "unmute"}, "Matched an unmute request.")
         if re.search(r"\b(?:mute|silence)\b", prompt, re.IGNORECASE):
-            return self._plan(
-                "control_volume", {"action": "mute"}, "Matched a mute request."
-            )
+            return self._plan("control_volume", {"action": "mute"}, "Matched a mute request.")
         if VOLUME_GET_PATTERN.search(prompt):
             return self._plan(
                 "control_volume", {"action": "get"}, "Matched a volume-status request."
@@ -243,9 +346,7 @@ class AgentPlanner:
             prompt,
             re.IGNORECASE,
         ):
-            return self._plan(
-                "get_system_performance", {}, "Matched a system-performance request."
-            )
+            return self._plan("get_system_performance", {}, "Matched a system-performance request.")
 
         if re.search(
             r"\b(?:create|open|make)\b.*\bblank\b.*\b(?:text|notepad)\b",
@@ -267,7 +368,7 @@ class AgentPlanner:
         )
         if search is not None:
             folder = self._folder_name(prompt)
-            query = search.group(1).strip(" .?!\"")
+            query = search.group(1).strip(' .?!"')
             if folder is not None and query:
                 return self._plan(
                     "search_approved_folder",
@@ -302,26 +403,45 @@ class AgentPlanner:
             tool = "spotify_control_playback" if "spotify" in prompt.casefold() else "control_media"
             return self._plan(tool, {"action": "previous"}, "Matched a previous-track request.")
         if re.search(r"\bstop\b.*\b(?:track|song|music|media|playback)\b", prompt, re.IGNORECASE):
+            return self._plan("control_media", {"action": "stop"}, "Matched a stop-media request.")
+        resume_playback = re.search(
+            r"^(?:please\s+)?(?:unpause|resume|continue)(?:\s+(?:this|it|the\s+)?"
+            r"(?:song|track|music|media|playback|spotify)?)?[.!?]*$|"
+            r"\b(?:unpause|resume|continue|carry\s+on|keep\s+playing|pick\s+back\s+up)\b"
+            r".*\b(?:song|track|music|media|playback|spotify)\b",
+            prompt,
+            re.IGNORECASE,
+        )
+        if resume_playback is not None:
+            if "spotify" in prompt.casefold():
+                return self._plan(
+                    "spotify_control_playback",
+                    {"action": "resume"},
+                    "Understood an ordinary resume-playback request.",
+                )
             return self._plan(
-                "control_media", {"action": "stop"}, "Matched a stop-media request."
+                "control_media",
+                {"action": "resume"},
+                "Understood an ordinary resume-playback request.",
             )
+
         playback = re.search(
-            r"^(?:play|pause|resume)(?:\s+(?:this|it|spotify))?$|"
-            r"\b(?:play|pause|resume)\b.*\b(?:media|music|playback|spotify)\b",
+            r"^(?:play|pause)(?:\s+(?:this|it|spotify))?$|"
+            r"\b(?:play|pause)\b.*\b(?:media|music|playback|spotify)\b",
             prompt,
             re.IGNORECASE,
         )
         if playback is not None:
-            verb = re.search(r"\b(play|pause|resume)\b", prompt, re.IGNORECASE)
+            verb = re.search(r"\b(play|pause)\b", prompt, re.IGNORECASE)
             action = verb.group(1).casefold() if verb is not None else "pause"
-            if "spotify" in prompt.casefold() and action in {"pause", "resume"}:
+            if "spotify" in prompt.casefold():
                 return self._plan(
                     "spotify_control_playback",
-                    {"action": action},
+                    {"action": "resume" if action == "play" else "pause"},
                     "Matched a Spotify control request.",
                 )
             return self._plan(
-                "control_media", {"action": "play_pause"}, "Matched a play/pause request."
+                "control_media", {"action": action}, "Matched an explicit play/pause request."
             )
 
         named_track = NAMED_TRACK_PATTERN.match(prompt)
@@ -335,28 +455,104 @@ class AgentPlanner:
                 )
         return None
 
+    def _contextual_plan(self, prompt: str) -> AgentPlan | None:
+        """Resolve pronouns against the newest relevant verified session action."""
+        clean = prompt.casefold().strip(" .!?")
+        with self._prepared_lock:
+            self._purge_expired_context_locked()
+            recent_plans = tuple(
+                plan
+                for item in reversed(self._recent_successes)
+                for plan in reversed(item.plans)
+                if plan.tool_name is not None
+            )
+        if not recent_plans:
+            return None
+
+        if clean in {"open it again", "open that again", "open the same one again"}:
+            previous = next(
+                (
+                    plan
+                    for plan in recent_plans
+                    if plan.tool_name in {"open_application", "open_folder"}
+                ),
+                None,
+            )
+            if previous is not None:
+                return self._plan(
+                    previous.tool_name,
+                    dict(previous.arguments),
+                    "Resolved the reference from the last successful open action.",
+                )
+
+        media_tools = {"control_media", "spotify_control_playback", "spotify_play_track"}
+        previous = next(
+            (plan for plan in recent_plans if plan.tool_name in media_tools),
+            None,
+        )
+        if previous is None:
+            return None
+        provider = (
+            "spotify_control_playback"
+            if previous.tool_name.startswith("spotify_")
+            else "control_media"
+        )
+        if re.fullmatch(r"(?:pause|stop) (?:it|that|the song|the music)", clean):
+            action = "pause" if provider == "spotify_control_playback" else "pause"
+            return self._plan(
+                provider,
+                {"action": action},
+                "Resolved the media reference from the last successful action.",
+            )
+        if re.fullmatch(r"(?:play|resume|unpause|continue) (?:it|that|the song|the music)", clean):
+            return self._plan(
+                provider,
+                {"action": "resume"},
+                "Resolved the media reference from the last successful action.",
+            )
+        if clean in {"next one", "the next one", "skip that", "play the next one"}:
+            return self._plan(
+                provider,
+                {"action": "next"},
+                "Resolved the track reference from the last successful media action.",
+            )
+        if clean in {"previous one", "the previous one", "go back to the last one"}:
+            return self._plan(
+                provider,
+                {"action": "previous"},
+                "Resolved the track reference from the last successful media action.",
+            )
+        return None
+
     @staticmethod
     def _plan(tool: str, arguments: dict[str, object], reason: str) -> AgentPlan:
         return AgentPlan(tool, arguments, reason, AgentPlanSource.DETERMINISTIC)
 
     def _model_plan(self, prompt: str) -> AgentPlan:
-        schemas = json.dumps(self.registry.schemas(), separators=(",", ":"))
+        schemas = json.dumps(self.registry.planner_schemas(), separators=(",", ":"))
+        context = json.dumps(self.context_summary(), separators=(",", ":"))
         try:
             result = self.client.stream_chat(
                 [
-                    {"role": "system", "content": f"{PLANNER_INSTRUCTION}\n{schemas}"},
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{PLANNER_INSTRUCTION}\n{schemas}\n"
+                            f"Recent verified action context: {context}"
+                        ),
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 think=False,
                 max_output_tokens=160,
                 temperature=0.0,
             )
-        except OllamaError:
-            return self._no_plan("The local planner was unavailable.")
+        except AIError:
+            return self._no_plan("The configured AI planner was unavailable.")
 
         payload = self._first_json_object(result.text)
         if payload is None:
-            return self._no_plan("The local planner returned invalid structured data.")
+            return self._no_plan("The AI planner returned invalid structured data.")
         tool_name = payload.get("tool")
         arguments = payload.get("arguments")
         if tool_name is None:
@@ -368,7 +564,7 @@ class AgentPlanner:
         return AgentPlan(
             tool_name,
             arguments,
-            "The local planner selected an approved tool.",
+            "The AI planner selected an approved tool.",
             AgentPlanSource.LOCAL_MODEL,
         )
 
@@ -413,8 +609,7 @@ class AgentPlanner:
         }
         for name, choices in aliases.items():
             if any(
-                re.search(rf"\b{re.escape(choice)}\b", prompt, re.IGNORECASE)
-                for choice in choices
+                re.search(rf"\b{re.escape(choice)}\b", prompt, re.IGNORECASE) for choice in choices
             ):
                 return name
         return None

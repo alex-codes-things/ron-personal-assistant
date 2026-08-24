@@ -2,13 +2,14 @@
 
 Ron Network is the small optional LAN layer that lets Ron's laptop brain discover and track companion devices such as the Nexus 7 face and future ESP32 hardware.
 
-It is deliberately **not** in the path for local commands. Volume, brightness, applications, local AI, voice, reminders and other laptop features continue to call their existing local code directly.
+It is deliberately **not** in the path for local commands. Volume, brightness, applications,
+voice, reminders and other laptop features continue to call their existing local code directly.
 
 ```text
                     Ron Brain (laptop)
                     /              \
             local features       Ron Network
-            AI / voice /         /    |     \
+            tools / voice /      /    |     \
             Windows tools      Face  future  sensors
                                      devices
 ```

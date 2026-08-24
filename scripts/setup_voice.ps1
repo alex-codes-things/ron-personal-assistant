@@ -12,6 +12,11 @@ $KwsUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$K
 $VadPath = Join-Path $VoiceModels "silero_vad.onnx"
 $VadUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 $WhisperRoot = Join-Path $VoiceModels "whisper"
+$TtsRoot = Join-Path $VoiceModels "tts"
+$KokoroModel = Join-Path $TtsRoot "kokoro-v1.0.int8.onnx"
+$KokoroVoices = Join-Path $TtsRoot "voices-v1.0.bin"
+$KokoroModelUrl = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.int8.onnx"
+$KokoroVoicesUrl = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin"
 
 function Invoke-CheckedDownload {
     param(
@@ -80,6 +85,7 @@ try {
 
     New-Item -ItemType Directory -Force -Path $VoiceModels | Out-Null
     New-Item -ItemType Directory -Force -Path $WhisperRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $TtsRoot | Out-Null
 
     $Encoder = Join-Path $KwsDirectory "encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx"
     if (-not (Test-Path $Encoder)) {
@@ -115,11 +121,23 @@ try {
         -ExpectedSha256 "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6"
     Assert-File $VadPath
 
-    Write-Host "Downloading base.en and small.en for the offline speed/accuracy comparison..."
+    Write-Host "Preparing Ron's local neural speaking voice..."
+    Invoke-CheckedDownload `
+        -Uri $KokoroModelUrl `
+        -Destination $KokoroModel `
+        -MinimumBytes 100000000
+    Invoke-CheckedDownload `
+        -Uri $KokoroVoicesUrl `
+        -Destination $KokoroVoices `
+        -MinimumBytes 25000000
+    Assert-File $KokoroModel
+    Assert-File $KokoroVoices
+
+    Write-Host "Downloading small.en fallback and distil-large-v3 accuracy model..."
     $WhisperScript = @"
 from faster_whisper import WhisperModel
 root = r'''$WhisperRoot'''
-for name in ('base.en', 'small.en'):
+for name in ('small.en', 'distil-large-v3'):
     print(f'Preparing {name}...')
     WhisperModel(name, device='cpu', compute_type='int8', cpu_threads=4, download_root=root)
 print('Whisper models are available offline.')
@@ -142,7 +160,9 @@ print('Whisper models are available offline.')
     Write-Host ""
     Write-Host "Voice setup complete. No tool has been executed."
     Write-Host "Next dry test: python scripts\test_wake_word.py --seconds 60"
-    Write-Host "Then benchmark: python scripts\benchmark_voice.py"
+    Write-Host "Then benchmark recognition: python scripts\benchmark_voice.py"
+    Write-Host "Accent-safe dry calibration: python scripts\calibrate_recognition.py"
+    Write-Host "Audition speaking voices: python scripts\audition_voices.py"
 }
 finally {
     Pop-Location

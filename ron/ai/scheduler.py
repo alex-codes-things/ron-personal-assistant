@@ -1,4 +1,4 @@
-"""One priority-aware gate for all local model inference."""
+"""One priority-aware gate for Ron's routed model requests."""
 
 from __future__ import annotations
 
@@ -8,19 +8,18 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from enum import IntEnum
-from typing import TypeVar
 
-from ron.ai.ollama_client import InferenceResult, OllamaClient, TokenHandler
-
-T = TypeVar("T")
+from ron.ai.client import AIClient
+from ron.ai.ollama_client import InferenceResult, TokenHandler
 
 
 class InferencePriority(IntEnum):
     TRANSCRIPTION = 0
-    CONVERSATION = 1
-    ROUTING = 2
-    PLANNING = 3
-    BACKGROUND = 4
+    SPEECH = 1
+    CONVERSATION = 2
+    ROUTING = 3
+    PLANNING = 4
+    BACKGROUND = 5
 
 
 class InferenceScheduler:
@@ -32,7 +31,7 @@ class InferenceScheduler:
         self._last_success_at: float | None = None
         self._last_error: str | None = None
 
-    def run(self, priority: InferencePriority, operation: Callable[[], T]) -> T:
+    def run[T](self, priority: InferencePriority, operation: Callable[[], T]) -> T:
         ticket = object()
         with self._condition:
             heapq.heappush(self._waiting, (int(priority), next(self._sequence), ticket))
@@ -68,12 +67,12 @@ class InferenceScheduler:
             return "not checked yet"
 
 
-class ScheduledOllamaClient:
-    """Ollama-compatible view with a fixed priority for one subsystem."""
+class ScheduledAIClient:
+    """Provider-neutral view with a fixed priority for one subsystem."""
 
     def __init__(
         self,
-        client: OllamaClient,
+        client: AIClient,
         scheduler: InferenceScheduler,
         priority: InferencePriority,
     ) -> None:
@@ -81,6 +80,11 @@ class ScheduledOllamaClient:
         self.scheduler = scheduler
         self.priority = priority
         self.settings = client.settings
+        self.is_local = client.is_local
+
+    @property
+    def provider_label(self) -> str:
+        return self.client.provider_label
 
     def stream_chat(
         self,
@@ -90,6 +94,7 @@ class ScheduledOllamaClient:
         think: bool = False,
         max_output_tokens: int = 128,
         temperature: float = 0.2,
+        cancel_event: threading.Event | None = None,
     ) -> InferenceResult:
         message_list = list(messages)
         return self.scheduler.run(
@@ -100,6 +105,7 @@ class ScheduledOllamaClient:
                 think=think,
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
+                cancel_event=cancel_event,
             ),
         )
 
@@ -111,3 +117,7 @@ class ScheduledOllamaClient:
 
     def preload(self) -> None:
         self.scheduler.run(self.priority, self.client.preload)
+
+
+# Compatibility for extensions which imported the old v0.10 class name.
+ScheduledOllamaClient = ScheduledAIClient

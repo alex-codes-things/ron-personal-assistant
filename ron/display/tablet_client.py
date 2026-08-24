@@ -57,12 +57,12 @@ class FaceConnectionUpdate:
     previous_status: ConnectionStatus = ConnectionStatus.STOPPED
 
 
-StatusListener = Callable[[FaceConnectionUpdate], None]
-QuickActionHandler = Callable[[str], QuickActionResult]
-EndpointProvider = Callable[[], tuple[str, int] | None]
-NetworkConnectedHandler = Callable[[str | None, int | None, dict[str, Any]], None]
-NetworkHeartbeatHandler = Callable[[dict[str, Any]], None]
-NetworkDisconnectedHandler = Callable[[], None]
+type StatusListener = Callable[[FaceConnectionUpdate], None]
+type QuickActionHandler = Callable[[str], QuickActionResult]
+type EndpointProvider = Callable[[], tuple[str, int] | None]
+type NetworkConnectedHandler = Callable[[str | None, int | None, dict[str, Any]], None]
+type NetworkHeartbeatHandler = Callable[[dict[str, Any]], None]
+type NetworkDisconnectedHandler = Callable[[], None]
 
 
 @dataclass(slots=True)
@@ -317,18 +317,21 @@ class TabletFaceClient:
                 backoff = 0.5
                 self._connected_loop(connection, decoder)
             except AdbUnavailableError as error:
-                self._logger.warning(
+                self._logger.debug(
                     "Tablet face is not reachable by LAN and ADB is unavailable: %s", error
                 )
                 self._set_status(ConnectionStatus.RETRYING)
             except DeviceUnauthorizedError as error:
-                self._logger.warning("Tablet face is waiting for USB permission: %s", error)
+                self._logger.debug("Tablet face is waiting for USB permission: %s", error)
                 self._set_status(ConnectionStatus.UNAUTHORIZED)
             except (AdbError, OSError, ProtocolError, TimeoutError) as error:
-                self._logger.warning("Tablet face connection unavailable: %s", error)
+                self._logger.debug("Tablet face connection unavailable: %s", error)
                 self._set_status(ConnectionStatus.RETRYING)
             except Exception:
-                self._logger.exception("Unexpected tablet-face failure; reconnecting safely")
+                self._logger.debug(
+                    "Unexpected tablet-face failure; reconnecting safely",
+                    exc_info=True,
+                )
                 self._set_status(ConnectionStatus.RETRYING)
             finally:
                 if connection is not None:
@@ -554,8 +557,6 @@ class TabletFaceClient:
         try:
             data = connection.recv(4096)
         except TimeoutError:
-            return []
-        except socket.timeout:
             return []
         if not data:
             raise ConnectionError("Tablet closed the face connection")

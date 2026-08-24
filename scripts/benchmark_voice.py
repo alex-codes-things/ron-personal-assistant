@@ -58,7 +58,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument(
         "--models",
-        default="base.en,small.en",
+        default="small.en,distil-large-v3",
         help="Comma-separated faster-whisper models to compare",
     )
     args = parser.parse_args()
@@ -76,22 +76,43 @@ def main() -> int:
         transcriber.load()
         transcriber.warm()
         load_seconds = time.perf_counter() - load_started
-        result = transcriber.transcribe(audio)
-        normalized = VoiceNormalizer(model_settings).normalize(
-            result.text,
+        fast = transcriber.transcribe(audio)
+        accurate = transcriber.retry(audio)
+        normalizer = VoiceNormalizer(model_settings)
+        normalized_fast = normalizer.normalize(
+            fast.text,
+            require_wake=True,
+            wake_detected=True,
+        )
+        normalized_accurate = normalizer.normalize(
+            accurate.text,
             require_wake=True,
             wake_detected=True,
         )
         print(f"Model: {model_name}")
         print(f"  Load + warm: {load_seconds:.2f} s")
-        print(f"  Final transcription: {result.duration_seconds:.2f} s")
-        print(f"  Confidence estimate: {result.confidence:.0%}")
-        print(f"  Raw: {result.text or '[empty]'}")
-        print(f"  Corrected command: {normalized.text or '[rejected]'}")
-        print(f"  Wake verified: {'yes' if normalized.accepted else 'no'}\n")
+        print(
+            f"  Fast beam {model_settings.asr_beam_size}: "
+            f"{fast.duration_seconds:.2f} s, confidence {fast.confidence:.0%}"
+        )
+        print(f"    Raw: {fast.text or '[empty]'}")
+        print(f"    Corrected: {normalized_fast.text or '[rejected]'}")
+        print(
+            f"  Retry beam {model_settings.asr_retry_beam_size}: "
+            f"{accurate.duration_seconds:.2f} s, confidence {accurate.confidence:.0%}"
+        )
+        print(f"    Raw: {accurate.text or '[empty]'}")
+        print(f"    Corrected: {normalized_accurate.text or '[rejected]'}")
+        print(
+            "  Fast real-time factor: "
+            f"{fast.duration_seconds / max(0.01, len(audio) / settings.sample_rate):.2f}x\n"
+        )
         del transcriber
         gc.collect()
-    print("Choose small.en unless it misses the latency target; otherwise use base.en.")
+    print(
+        "Keep distil-large-v3 when its fast real-time factor is practical. "
+        "Use small.en only if the measured fast pass is still too slow."
+    )
     return 0
 
 

@@ -4,8 +4,8 @@ from ron.ai import InferenceMetrics, InferenceResult
 from ron.assistant import RonAssistant
 from ron.chat import ChatService, ChatSettings, ConversationHistory
 from ron.core import Coordinator, EventType
-from ron.terminal import TerminalChat
 from ron.routing import PromptRouter
+from ron.terminal import TerminalChat
 
 
 class FakeOllamaClient:
@@ -103,9 +103,13 @@ def test_terminal_supports_continuous_mode_and_clean_shutdown() -> None:
     assert terminal.run() == 0
     rendered = output.getvalue()
     assert "Continuous chat started" in rendered
-    assert "Ron > Hi!" in rendered
+    assert "Ron  · Understanding your request" in rendered
+    assert "Ron  · Thinking about the reply" in rendered
+    assert "Ron  › Hi!" in rendered
     assert "Mode: continuous chat; remembered turns: 1" in rendered
     assert "See you soon" in rendered
+    assert "RON  ·  PERSONAL ASSISTANT" in rendered
+    assert "Ron >" not in rendered
 
 
 def test_terminal_strips_control_sequences_from_model_output() -> None:
@@ -123,3 +127,73 @@ def test_terminal_strips_control_sequences_from_model_output() -> None:
 
     assert "\x1b" not in output.getvalue()
     assert "Safe[31m text" in output.getvalue()
+
+
+def test_terminal_health_command_uses_runtime_monitor() -> None:
+    prompts = iter(["/health", "/quit"])
+    output = StringIO()
+    fake_client = FakeOllamaClient(("unused",))
+    coordinator = Coordinator()
+    chat = ChatService(coordinator, client=fake_client, settings=ChatSettings())
+    assistant = RonAssistant(coordinator, chat, PromptRouter(fake_client))
+    terminal = TerminalChat(
+        assistant,
+        input_reader=lambda prompt: next(prompts),
+        output=output,
+        health_provider=lambda: "Health READY: all essential systems ready.",
+    )
+
+    assert terminal.run() == 0
+    assert "Ron  › Health READY: all essential systems ready." in output.getvalue()
+    assert fake_client.requests == []
+
+
+def test_memory_failure_does_not_turn_a_chat_reply_into_failure() -> None:
+    class FailingMemory:
+        def remember_conversation(self, user: str, assistant: str) -> None:
+            del user, assistant
+            raise OSError("simulated memory failure")
+
+    coordinator = Coordinator()
+    fake_client = FakeOllamaClient(("Still working",))
+    chat = ChatService(coordinator, client=fake_client, settings=ChatSettings())
+    assistant = RonAssistant(
+        coordinator,
+        chat,
+        PromptRouter(fake_client),
+        memory=FailingMemory(),  # type: ignore[arg-type]
+    )
+
+    response = assistant.respond("Hello Ron")
+
+    assert response.text == "Still working"
+    assert chat.history.turn_count == 1
+
+
+def test_spoken_chat_adds_voice_specific_style_instruction() -> None:
+    coordinator = Coordinator()
+    fake_client = FakeOllamaClient(("Right away.",))
+    chat = ChatService(coordinator, client=fake_client, settings=ChatSettings())
+
+    chat.respond("How are you?", spoken=True)
+
+    system = fake_client.requests[0][0]["content"]
+    assert "request arrived by voice" in system
+    assert "original British-style personal assistant" in system
+    assert "complete response will remain visible in the terminal" in system
+
+
+
+def test_spoken_generation_does_not_animate_mouth_before_audio() -> None:
+    coordinator = Coordinator()
+    fake_client = FakeOllamaClient(("Ready.",))
+    expressions: list[str] = []
+    coordinator.subscribe(
+        EventType.FACE_EXPRESSION,
+        lambda event: expressions.append(str(event.payload["expression"])),
+    )
+    chat = ChatService(coordinator, client=fake_client, settings=ChatSettings())
+
+    chat.respond("Status?", spoken=True)
+
+    assert expressions == ["thinking", "idle"]

@@ -18,7 +18,7 @@ from ron.agent.models import (
 )
 from ron.agent.registry import ToolRegistry
 
-TaskListener = Callable[[AgentTaskSnapshot], None]
+type TaskListener = Callable[[AgentTaskSnapshot], None]
 CLOSED_TASK_STATES = {
     AgentTaskStatus.COMPLETED,
     AgentTaskStatus.FAILED,

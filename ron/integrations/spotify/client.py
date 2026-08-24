@@ -123,11 +123,6 @@ class SpotifyClient:
             raise SpotifyError("Spotify returned no playable matching track")
         return results
 
-    def search_track(
-        self, query: str, context: ToolExecutionContext | None = None
-    ) -> SpotifyTrack:
-        return self.search_tracks(query, context)[0]
-
     def play_track(
         self, track: SpotifyTrack, context: ToolExecutionContext | None = None
     ) -> None:
@@ -156,13 +151,6 @@ class SpotifyClient:
             allow_empty=True,
             context=context,
         )
-
-    def search_and_play(
-        self, query: str, context: ToolExecutionContext | None = None
-    ) -> SpotifyTrack:
-        track = self.search_track(query, context)
-        self.play_track(track, context)
-        return track
 
     def control_playback(
         self, action: str, context: ToolExecutionContext | None = None

@@ -11,6 +11,7 @@ from threading import RLock
 from time import monotonic
 from typing import Any
 
+
 class FaceExpression(StrEnum):
     """Expressions understood by every Ron face implementation."""
 
@@ -49,7 +50,7 @@ class RonEvent:
     created_at: float = field(default_factory=monotonic)
 
 
-EventHandler = Callable[[RonEvent], None]
+type EventHandler = Callable[[RonEvent], None]
 
 
 class Coordinator:

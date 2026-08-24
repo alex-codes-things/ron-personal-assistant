@@ -68,7 +68,7 @@ def test_face_offline_warning_is_restrained_and_reconnect_is_announced() -> None
     assert notices[2].startswith("[FACE OFFLINE]")
 
 
-def test_face_permission_change_gets_one_specific_notice() -> None:
+def test_face_permission_change_does_not_repeat_notice_during_same_outage() -> None:
     client = FakeFaceClient()
     display = _display(client)
     notices: list[str] = []
@@ -78,8 +78,8 @@ def test_face_permission_change_gets_one_specific_notice() -> None:
     client.emit(ConnectionStatus.UNAUTHORIZED, "approve debugging")
     client.emit(ConnectionStatus.UNAUTHORIZED, "approve debugging")
 
-    assert len(notices) == 2
-    assert notices[1].startswith("[FACE NEEDS PERMISSION]")
+    assert len(notices) == 1
+    assert notices[0].startswith("[FACE OFFLINE]")
 
 
 def test_face_startup_failure_does_not_stop_ron() -> None:
@@ -91,6 +91,24 @@ def test_face_startup_failure_does_not_stop_ron() -> None:
 
     assert notices
     assert "still fully working" in notices[0]
+
+
+def test_zero_face_reminder_interval_never_repeats_offline_notice() -> None:
+    client = FakeFaceClient()
+    display = TabletFaceDisplay(
+        Coordinator(),
+        Path("."),
+        client=client,
+        reminder_interval_seconds=0.0,
+    )
+    notices: list[str] = []
+    display.add_notice_listener(notices.append)
+
+    display._announce_offline(force=False)
+    display._last_offline_notice = -1_000_000.0
+    display._announce_offline(force=False)
+
+    assert len(notices) == 1
 
 
 def test_terminal_prints_queued_face_notice_without_live_console() -> None:
@@ -111,5 +129,5 @@ def test_terminal_prints_queued_face_notice_without_live_console() -> None:
 
     assert terminal.run() == 0
     text = output.getvalue()
-    assert "Ron is ready" in text
-    assert "[FACE OFFLINE]" in text
+    assert "Ready. Type a message" in text
+    assert "FACE OFFLINE  ·  Ron is still fully working." in text

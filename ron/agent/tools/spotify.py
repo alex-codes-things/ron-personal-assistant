@@ -16,7 +16,7 @@ from ron.agent.models import (
 from ron.agent.registry import ToolSpec
 from ron.integrations.spotify import SpotifyClient, SpotifyError, SpotifyTrack
 
-SpotifyFactory = Callable[[], SpotifyClient | None]
+type SpotifyFactory = Callable[[], SpotifyClient | None]
 
 
 def _availability(client_factory: SpotifyFactory) -> tuple[bool, str]:
@@ -59,15 +59,6 @@ def build_spotify_tool(client_factory: SpotifyFactory) -> ToolSpec:
                 "Spotify is not configured.",
             )
         try:
-            if not hasattr(client, "search_tracks"):
-                selected = client.search_and_play(query)
-                artists = ", ".join(selected.artists)
-                return ToolResult(
-                    "spotify_play_track",
-                    ToolStatus.SUCCESS,
-                    f"Playing {selected.name} by {artists} on Spotify.",
-                    data={"name": selected.name, "artists": list(selected.artists)},
-                )
             tracks = client.search_tracks(query, context)
             if choice is None and not _confident_match(query, tracks):
                 candidates = [
@@ -127,6 +118,7 @@ def build_spotify_tool(client_factory: SpotifyFactory) -> ToolSpec:
         play_track,
         timeout_seconds=30.0,
         availability=lambda: _availability(client_factory),
+        run_in_background=True,
     )
 
 

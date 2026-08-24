@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from ron.app import RonApplication
 from ron.routing import PromptRouter, RouteDestination
 from ron.voice.normalizer import VoiceNormalizer
 from ron.voice.settings import VoiceSettings
@@ -23,3 +24,15 @@ def test_corrected_voice_command_uses_existing_deterministic_router() -> None:
 
     assert result.text == "open Spotify"
     assert decision.destination is RouteDestination.AGENT
+
+
+def test_agent_progress_maps_to_short_spoken_action_cues() -> None:
+    assert (
+        RonApplication._voice_progress_phrase("Running: opening the application…")
+        == "Opening it now."
+    )
+    assert (
+        RonApplication._voice_progress_phrase("Running: controlling the current media…")
+        == "Adjusting playback."
+    )
+    assert RonApplication._voice_progress_phrase("Planning the safest action…") is None

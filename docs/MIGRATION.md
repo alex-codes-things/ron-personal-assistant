@@ -53,3 +53,23 @@ Once voice, Spotify, reminders and the tablet are working, the old project can r
 ### Optional: preserve Git history
 
 If the old project is a Git repository, you can copy its `.git` directory into the cleaned project before committing the refactor. Run `git status` and review the large layout change before committing it.
+
+
+## Ron 0.4: initialize external long-term memory
+
+The memory redesign does not move active voice models, reminders, Spotify credentials, or
+other performance-critical runtime data off the laptop. After upgrading, initialize the
+external HDD once:
+
+```powershell
+python scripts/setup_storage.py E:\
+```
+
+Use the actual drive root shown by Windows. Once initialized, the drive contains a private
+`.ron-storage.json` identity marker and Ron stores its matching ID under
+`runtime\memory\core\storage_binding.json`. Normal operation does not depend on the
+Windows drive letter after that.
+
+If the HDD is disconnected, keep using Ron normally. Long-term memory writes are queued
+under `runtime\memory\storage_queue\` and synchronize after the verified drive returns.
+See `MEMORY_AND_STORAGE.md` for the full safety and visual-memory design.

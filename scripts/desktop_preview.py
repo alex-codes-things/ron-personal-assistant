@@ -34,8 +34,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
-
-Expression = Literal[
+type Expression = Literal[
     "idle",
     "listening",
     "thinking",
