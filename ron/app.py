@@ -9,7 +9,7 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from ron.agent import AgentPlanner, AgentService, build_default_registry
+from ron.agent.core_runtime import build_agent_core
 from ron.ai import (
     InferencePriority,
     InferenceScheduler,
@@ -21,9 +21,9 @@ from ron.chat import ChatService
 from ron.core import Coordinator, EventType, FaceExpression, RonEvent
 from ron.display import TabletFaceDisplay
 from ron.network import NetworkService
-from ron.terminal import TerminalChat
 from ron.reminders import ReminderManager
-from ron.routing import PromptRouter
+from ron.routing_core import AgentCoreRouter
+from ron.terminal import TerminalChat
 from ron.voice import VoiceInput, VoiceReply, VoiceService, VoiceSettings
 from ron.voice.settings import VoiceSettingsError
 
@@ -54,15 +54,16 @@ class RonApplication:
         reminder_path = self.project_root / "runtime" / "data" / "reminders.sqlite"
         self.reminders = ReminderManager(reminder_path)
         self.chat = ChatService(self.coordinator, client=self.chat_ai)
-        self.router = PromptRouter(self.routing_ai)
-        self.tools = build_default_registry(self.project_root, self.reminders)
-        self.agent_planner = AgentPlanner(self.planning_ai, self.tools)
-        self.agent = AgentService(
-            self.agent_planner,
-            self.tools,
-            project_root=self.project_root,
-            reminder_manager=self.reminders,
+        self.router = AgentCoreRouter(self.routing_ai)
+        self.agent_core = build_agent_core(
+            self.project_root,
+            self.planning_ai,
+            self.reminders,
+            self.network,
         )
+        self.tools = self.agent_core.registry
+        self.agent_planner = self.agent_core.planner
+        self.agent = self.agent_core.service
         self.assistant = RonAssistant(
             self.coordinator, self.chat, self.router, agent=self.agent
         )
@@ -186,7 +187,7 @@ class RonApplication:
             message = "Continuous chat started. You don't need to repeat the wake word."
         elif command in {"end chat", "stop chat", "go to sleep", "that's all"}:
             self.chat.end_continuous_chat()
-            message = "Continuous chat ended. Say \"Hey Ron\" when you need me."
+            message = 'Continuous chat ended. Say "Hey Ron" when you need me.'
         else:
             try:
                 message = self.assistant.respond(prompt).text
